@@ -1,0 +1,8 @@
+# Copy or rename this file to .env and fill in your values
+DISCORD_TOKEN=
+COMMAND_PREFIX=!
+# Database: PostgreSQL for production, SQLite for dev (same code)
+# DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/gacha
+DATABASE_URL=sqlite+aiosqlite:///data/game.db
+# LOG_LEVEL=INFO                             # DEBUG | INFO | WARNING | ERROR
+MAINTAINER_GUILD_ID=    # guild that receives error logs centrally
