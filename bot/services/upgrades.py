@@ -1,90 +1,56 @@
-"""Upgrade catalog and upgrade service.
+"""Upgrade service — the catalog lives in content JSON (``upgrades.json``).
 
-An :class:`UpgradeSpec` is a declarative descriptor (dataclass) with a
-cost curve function. Effects are aggregated into a dict consumed by
-`StatProfile.compose`.
+Buying levels, cost curves and effect aggregation are identical for
+every spec; adding a new upgrade is a JSON entry, nothing else.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Callable
 
-from bot.config import CONFIG, CONSTANTS
-from bot.core.database import Database
+from sqlalchemy import text
+
+from bot.core.events import GameEvent
 from bot.core.exceptions import InsufficientFundsError, UpgradeError
 from bot.models.player import Player
 from bot.services.base import BaseService
 
-
-@dataclass(frozen=True, slots=True)
-class UpgradeSpec:
-    key: str
-    name: str
-    description: str
-    emoji: str
-    base_cost: int
-    cost_growth: float          # exponential cost curve
-    effect_per_level: float
-    max_level: int = CONFIG.max_upgrade_level
-
-    def cost(self, current_level: int) -> int:
-        """Cost to go from `current_level` to +1 (exponential curve)."""
-        return int(self.base_cost * (self.cost_growth ** current_level))
-
-    def effect(self, level: int) -> float:
-        return self.effect_per_level * level
+if TYPE_CHECKING:
+    from bot.content.registry import ContentRegistry, UpgradeSpec
+    from bot.core.cooldowns import CooldownManager
+    from bot.core.database import Database
+    from bot.core.events import EventBus
+    from bot.config import GameSettings
 
 
-class UpgradeCatalog:
-    """Static registry of available upgrades (pattern: catalog object)."""
-
-    _specs: dict[str, UpgradeSpec] = {
-        u.key: u
-        for u in (
-            UpgradeSpec("luck",      "Fortune",       "Boosts rare drops in gacha & hunts.", "\U0001f380", 2_000,   1.35, 0.02),
-            UpgradeSpec("greed",     "Greed",         "+5% coin gains per level.",            "\U0001f999", 2_500,   1.38, 0.05),
-            UpgradeSpec("swiftness", "Swiftness",     "Reduces hunt cooldown by 2%/level.",   "\u26a1",       3_000,   1.40, 0.02),
-            UpgradeSpec("power",     "Battle Power",  "+3 attack-equivalent per level.",      "\u2694\ufe0f",  1_800,   1.33, 3.0),
-            UpgradeSpec("harvest",   "Harvest",       "Huntbot yields +4% per level.",        "\U0001f916", 5_000,   1.45, 0.04),
-        )
-    }
-
-    @classmethod
-    def get(cls, key: str) -> UpgradeSpec:
-        try:
-            return cls._specs[key]
-        except KeyError:
-            raise UpgradeError(f"Unknown upgrade `{key}`.", upgrade_key=key) from None
-
-    @classmethod
-    def all(cls) -> list[UpgradeSpec]:
-        return list(cls._specs.values())
-
-    @classmethod
-    def effects(cls) -> dict[str, float]:
-        return {u.key: u.effect_per_level for u in cls._specs.values()}
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class UpgradeService(BaseService):
     log_name = "gacha.upgrades"
 
-    def __init__(self, db: Database, get_player: Callable) -> None:
+    def __init__(self, db: "Database", content: "ContentRegistry", settings: "GameSettings",
+                 bus: "EventBus", cooldowns: "CooldownManager", get_player: Callable) -> None:
+        super().__init__(db, content, settings, bus, cooldowns)
         self._get_player = get_player  # dependency injected from EconomyService
-        super().__init__(db)
 
     async def on_start(self) -> None:
-        self.log.info("Upgrade service ready (%d upgrades)", len(UpgradeCatalog.all()))
+        self.log.info("Upgrade service ready (%d upgrades)", len(self.content.all_upgrades()))
 
-    async def levels_for(self, user_id: int) -> dict[str, int]:
+    async def levels_for(self, guild_id: int, user_id: int) -> dict[str, int]:
         rows = await self.db.fetch_all(
-            "SELECT upgrade_key, level FROM upgrades WHERE user_id = ?", (str(user_id),)
+            "SELECT upgrade_key, level FROM upgrades WHERE guild_id = :g AND user_id = :u",
+            {"g": guild_id, "u": user_id},
         )
         return {r["upgrade_key"]: r["level"] for r in rows}
 
-    async def buy(self, player: Player, key: str) -> tuple[int, int]:
-        """Purchase one level; returns (new_level, cost)."""
-        spec = UpgradeCatalog.get(key)
-        current = (await self.levels_for(player.user_id)).get(key, 0)
+    async def buy(self, guild_id: int | None, player: Player, key: str) -> tuple["UpgradeSpec", int]:
+        """Purchase one level; returns (spec, new_level)."""
+        spec = self.content.upgrade(key)
+        if spec is None:
+            raise UpgradeError(f"Unknown upgrade `{key}`.", upgrade_key=key)
+        current = (await self.levels_for(player.guild_id, player.user_id)).get(key, 0)
         if current >= spec.max_level:
             raise UpgradeError(
                 f"`{spec.name}` is already maxed (level {current}/{spec.max_level}).",
@@ -94,28 +60,39 @@ class UpgradeService(BaseService):
         if player.balance < cost:
             raise InsufficientFundsError(cost, player.balance)
 
+        now = _now_iso()
         async with self.db.transaction() as conn:
             await conn.execute(
-                "UPDATE players SET balance = balance - ?, updated_at = datetime('now') WHERE user_id = ?",
-                (cost, str(player.user_id)),
+                text("UPDATE players SET balance = balance - :c, updated_at = :t WHERE guild_id = :g AND user_id = :u"),
+                {"c": cost, "t": now, "g": player.guild_id, "u": player.user_id},
             )
             await conn.execute(
-                """
-                INSERT INTO upgrades (user_id, upgrade_key, level) VALUES (?, ?, 1)
-                ON CONFLICT(user_id, upgrade_key) DO UPDATE SET level = level + 1
-                """,
-                (str(player.user_id), key),
+                text(
+                    """
+                    INSERT INTO upgrades (guild_id, user_id, upgrade_key, level) VALUES (:g, :u, :k, 1)
+                    ON CONFLICT (guild_id, user_id, upgrade_key) DO UPDATE SET level = level + 1
+                    """
+                ),
+                {"g": player.guild_id, "u": player.user_id, "k": key},
             )
             await conn.execute(
-                """
-                INSERT INTO economy_log (user_id, delta, reason, balance_after)
-                VALUES (?, ?, ?, ?)
-                """,
-                (str(player.user_id), -cost, f"upgrade:{key}", player.balance - cost),
+                text(
+                    """
+                    INSERT INTO economy_log (guild_id, user_id, delta, reason, balance_after, created_at)
+                    VALUES (:g, :u, :d, :r, :b, :t)
+                    """
+                ),
+                {"g": player.guild_id, "u": player.user_id, "d": -cost, "r": f"upgrade:{key}", "b": player.balance - cost, "t": now},
             )
             new_level = current + 1
 
         player.balance -= cost
         player.upgrades[key] = new_level
         self.log.info("user=%s upgraded %s -> level %d (-%d coins)", player.user_id, key, new_level, cost)
-        return new_level, cost
+        await self.bus.publish(
+            GameEvent(
+                category="upgrades", action="buy", guild_id=guild_id, user_id=player.user_id,
+                message=f"{spec.name} \u2192 level {new_level} (-{cost:,})",
+            )
+        )
+        return spec, new_level

@@ -5,105 +5,76 @@ import discord
 from discord.ext import commands
 
 from bot.cogs.common import GameMixin
-from bot.config import CONFIG, CONSTANTS
-from bot.models.game_data import load_game_data
-from bot.services.gacha import PullSession
-from bot.utils.embeds import COLOUR_GOLD, base_embed, error_embed, money
-
-load_game_data()
+from bot.config import SETTINGS
+from bot.ui import components as ui
+from bot.ui.theme import Theme
 
 
 class GachaCog(GameMixin):
     """\U0001f3a3 Gacha pulling & collection commands."""
 
+    CATEGORY_EMOJI = "\U0001f3b2"
+    CATEGORY_LABEL = "Gacha"
+
     @commands.hybrid_command(name="pull", aliases=["gacha", "wish"], description="Pull a card or equipment.")
-    @commands.cooldown(3, 10, commands.BucketType.user)
     async def pull(self, ctx: commands.Context, count: int = 1) -> None:
-        if count not in (1, 10):
+        if count not in (1, SETTINGS.gacha.multi_count):
             await ctx.reply(
-                embed=error_embed("Use `1` for a single pull or `10` for a multi-pull (10% discount)."),
+                embed=Theme.error_embed(
+                    f"Use `1` for a single pull or `{SETTINGS.gacha.multi_count}` for a multi-pull (10% discount)."
+                ),
                 mention_author=False,
             )
             return
-        player, _ = await self.player_profile(ctx.author)
-        session: PullSession = await self.bot.gacha.pull(player, count)
-
-        lines = [o.describe() for o in session.outcomes]
-        pity_note = " \U0001f6a8 **PITY!**" if any(o.pity_triggered for o in session.outcomes) else ""
-        embed = base_embed(
-            f"\U0001f3a3 Pull Results x{count}{pity_note}",
-            "\n".join(lines),
-            session.best.colour,
+        player, _ = await self.player_profile(ctx)
+        session = await self.bot.gacha.pull(self.scope_guild(ctx), player, count)
+        await ctx.reply(
+            view=ui.pull_view(session, SETTINGS.shards.emoji, SETTINGS.gacha.pity_limit),
+            mention_author=False,
         )
-        embed.add_field(
-            name="Summary",
-            value=(
-                f"Cost: {money(session.cost)}\n"
-                f"New cards: **{session.new_cards}**\n"
-                f"Shards: +{session.shards_gained} {CONSTANTS.shard_emoji}\n"
-                f"Pity: {player.pity_counter}/{CONFIG.gacha_pity_limit}"
-            ),
-            inline=False,
-        )
-        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="collection", aliases=["coll", "dex"], description="View your card collection.")
     async def collection(self, ctx: commands.Context, member: discord.Member | None = None) -> None:
         target = member or ctx.author
-        owned, total = await self.bot.gacha.collection_progress(target.id)
-        cards = await self.bot.gacha.collection(target.id)
-
+        player, _ = await self.bot.player_profile(self.scope_guild(ctx), target.id)
+        owned, total = await self.bot.gacha.collection_progress(player.guild_id, target.id)
+        cards = await self.bot.gacha.collection(player.guild_id, target.id)
         lines = [f"{c.rarity.emoji} **{c.name}** {c.rarity.stars} x{qty}" for c, qty in cards[:25]]
-        missing = total - owned
-        body = "\n".join(lines) if lines else "*Nothing yet — go pull!*"
-        embed = base_embed(
-            f"\U0001f4d6 {target.display_name}'s Collection",
-            f"**{owned}**/{total} unique cards ({missing} missing)\n\n{body}",
-            COLOUR_GOLD,
+        await ctx.reply(
+            view=ui.collection_view(target.display_name, lines, owned, total),
+            mention_author=False,
         )
-        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="sell_dupes", description="Convert duplicate cards into coins.")
     async def sell_dupes(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx.author)
-        gained = await self.bot.gacha.sell_duplicates(player)
+        player, _ = await self.player_profile(ctx)
+        gained = await self.bot.gacha.sell_duplicates(self.scope_guild(ctx), player)
         if gained == 0:
-            await ctx.reply(embed=error_embed("No duplicate cards to sell."), mention_author=False)
+            await ctx.reply(embed=Theme.error_embed("No duplicate cards to sell."), mention_author=False)
             return
-        embed = base_embed(
-            "\U0001f4b1 Duplicates Sold",
-            f"You converted spare cards into {money(gained)}.\nNew balance: {money(player.balance)}",
+        await ctx.reply(
+            ui.plain(f"\U0001f4b1 Sold duplicates for {SETTINGS.money(gained)} — new balance: {SETTINGS.money(player.balance)}."),
+            mention_author=False,
         )
-        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_group(name="shards", invoke_without_command=True, description="Shard currency info.")
     async def shards(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx.author)
-        pull_cost = int(CONFIG.gacha_pull_cost / 10)
-        embed = base_embed(
-            f"{CONSTANTS.shard_emoji} Shards",
-            (
-                f"You have **{player.shards:,}** shards.\n\n"
-                f"Shards come from duplicate pulls.\n"
-                f"Spend them with `{ctx.clean_prefix}shards pull` \u2014 "
-                f"one pull costs **{pull_cost}** shards."
-            ),
-            COLOUR_GOLD,
+        player, _ = await self.player_profile(ctx)
+        pull_cost = int(SETTINGS.gacha.pull_cost / SETTINGS.gacha.shard_pull_divisor)
+        explanation = (
+            f"Shards come from duplicate pulls.\n"
+            f"Spend them with `{ctx.clean_prefix}shards pull` — one pull costs **{pull_cost}** shards."
         )
-        await ctx.reply(embed=embed, mention_author=False)
+        await ctx.reply(view=ui.shard_info_view(player.shards, explanation), mention_author=False)
 
     @shards.command(name="pull", description="Spend shards on a pull.")
     async def shards_pull(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx.author)
-        session = await self.bot.gacha.pull(player, count=1, use_shards=True)
-        outcome = session.outcomes[0]
-        pity_note = " \U0001f6a8 **PITY!**" if outcome.pity_triggered else ""
-        embed = base_embed(
-            f"{CONSTANTS.shard_emoji} Shard Pull{pity_note}",
-            outcome.describe(),
-            outcome.rarity.colour,
+        player, _ = await self.player_profile(ctx)
+        session = await self.bot.gacha.pull(self.scope_guild(ctx), player, 1, use_shards=True)
+        await ctx.reply(
+            view=ui.pull_view(session, SETTINGS.shards.emoji, SETTINGS.gacha.pity_limit),
+            mention_author=False,
         )
-        await ctx.reply(embed=embed, mention_author=False)
 
 
 async def setup(bot) -> None:

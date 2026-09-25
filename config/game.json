@@ -1,0 +1,77 @@
+{
+    "economy": {
+        "scope": "guild",
+        "starting_balance": 250,
+        "daily_reward": 1000,
+        "daily_level_bonus": 25,
+        "work_min": 150,
+        "work_max": 500
+    },
+    "currency": {
+        "name": "Coins",
+        "emoji": "\ud83e\ude99"
+    },
+    "shards": {
+        "name": "Shards",
+        "emoji": "\u2728"
+    },
+    "xp": {
+        "per_hunt_min": 10,
+        "per_hunt_max": 40,
+        "curve_base": 1.35
+    },
+    "cooldowns": {
+        "fixed": {
+            "daily": 86400,
+            "work": 3600,
+            "hunt": 45
+        },
+        "windows": {
+            "pull": { "max_calls": 3, "window": 10 }
+        }
+    },
+    "spawn": {
+        "algorithm": "weighted_luck",
+        "luck_tilt_exponent": 1.0
+    },
+    "gacha": {
+        "pull_cost": 100,
+        "multi_cost": 900,
+        "multi_count": 10,
+        "shard_pull_divisor": 10,
+        "pity_limit": 90,
+        "soft_pity": 75,
+        "soft_ramp": 8.0,
+        "pity_floor": "legendary",
+        "pity_floor_upgrade_chance": 0.9,
+        "card_chance": 0.6
+    },
+    "hunt": {
+        "tier_cap_divisor": 60,
+        "equipment_drop_base": 0.06,
+        "equipment_drop_per_tier": 0.02,
+        "equipment_drop_luck_scale": 0.15,
+        "card_drop_per_tier": 0.015,
+        "card_drop_luck_scale": 0.05
+    },
+    "huntbot": {
+        "base_cost": 15000,
+        "cost_growth": 1.6,
+        "tick_seconds": 300,
+        "battery_capacity": 24,
+        "loop_interval": 60,
+        "item_drop_chance": 0.08,
+        "base_income": 35,
+        "income_per_level": 15,
+        "efficiency_per_level": 0.1
+    },
+    "equipment": {
+        "max_level": 10,
+        "forge_growth": 0.12,
+        "upgrade_cost_base": 250,
+        "sell_level_bonus": 0.15
+    },
+    "upgrades": {
+        "max_level": 25
+    }
+}

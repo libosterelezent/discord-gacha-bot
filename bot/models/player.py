@@ -8,16 +8,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from bot.config import CONFIG, CONSTANTS
+from bot.config import SETTINGS
 from bot.models.items import Equipment
-from bot.models.rarities import Rarity
 
 
 @dataclass(slots=True)
 class Player:
-    """Persistent player aggregate loaded from the database."""
+    """Persistent player aggregate loaded from the database.
+
+    `guild_id` scopes the player row: in guild-scoped economy mode every
+    server has an independent profile; in global mode all rows live
+    under the sentinel guild id ``0``.
+    """
 
     user_id: int
+    guild_id: int = 0
     balance: int = 0
     shards: int = 0
     xp: int = 0
@@ -42,7 +47,7 @@ class Player:
 
     @property
     def xp_to_next(self) -> int:
-        base = CONSTANTS.xp_curve_base
+        base = SETTINGS.xp.curve_base
         return int(100 * (base ** (self.level - 1)))
 
     def xp_progress(self) -> tuple[int, int]:
@@ -64,8 +69,8 @@ class StatProfile:
     def compose(cls, player: Player, upgrade_effects: dict[str, float]) -> "StatProfile":
         """Factory: derive effective stats from player state.
 
-        `upgrade_effects` maps upgrade keys to their per-level bonus,
-        e.g. {"luck": 0.02, "coin_boost": 0.05, "swift": 0.01}.
+        `upgrade_effects` maps upgrade keys to their per-level bonus
+        (provided by the content registry), e.g. {"luck": 0.02, ...}.
         """
         atk = dfn = luk = 0
         equipped: list[Equipment] = []
@@ -74,6 +79,8 @@ class StatProfile:
             dfn += item.defense
             luk += item.luck
             equipped.append(item)
+
+        atk += round(player.upgrades.get("power", 0) * upgrade_effects.get("power", 0.0))
 
         luck_rating = luk + player.upgrades.get("luck", 0) * 2
         base_luck = luck_rating * 0.005                     # every luck point: +0.5%

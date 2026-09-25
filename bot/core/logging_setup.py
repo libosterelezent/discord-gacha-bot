@@ -53,7 +53,7 @@ def setup_logging(log_dir: Path, level: str = "INFO", max_bytes: int = 2_000_000
     root.addHandler(console)
 
     # Quiet noisy third-party loggers.
-    for noisy in ("discord", "discord.http", "aiosqlite", "asyncio"):
+    for noisy in ("discord", "discord.http", "sqlalchemy", "asyncio"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     root.propagate = False

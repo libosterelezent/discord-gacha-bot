@@ -1,19 +1,24 @@
 """Item model definitions.
 
-* :class:`EquipmentType` — slots (weapon/armor/amulet)
-* :class:`Equipment`     — a concrete, rolled equipment instance
-* :class:`GachaCard`     — collectible characters pulled from gacha
-* :class:`ItemRegistry`  — metaclass-powered global registry so item
-  definitions are declared once and looked up everywhere by key.
+* :class:`EquipmentType`  — slots (weapon/armor/amulet)
+* :class:`EquipmentTemplate` — blueprint loaded from content JSON
+* :class:`Equipment`      — a concrete, rolled equipment instance
+* :class:`GachaCard`      — collectible characters pulled from gacha
+* :class:`HuntEnemy`      — enemy encountered during a hunt
+
+Rarities are *values from the content registry* (see
+``bot.content.registry.RarityTier``), not enum members, so content can
+grow without code changes.
 """
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
-from typing import ClassVar, Iterator
+from typing import TYPE_CHECKING, ClassVar
 
-from bot.models.rarities import Rarity
+if TYPE_CHECKING:
+    from bot.content.registry import RarityTier
 
 
 class EquipmentType(Enum):
@@ -29,20 +34,31 @@ class EquipmentType(Enum):
     def key(self) -> str:
         return self.name.lower()
 
+    @classmethod
+    def from_key(cls, key: str) -> "EquipmentType | None":
+        try:
+            return cls[key.upper()]
+        except KeyError:
+            return None
+
 
 @dataclass(frozen=True, slots=True)
 class EquipmentTemplate:
-    """Blueprint for a piece of equipment (immutable)."""
+    """Blueprint for a piece of equipment (immutable, loaded from JSON)."""
 
     key: str
     name: str
-    etype: EquipmentType
+    slot: str                       # "weapon" | "armor" | "amulet"
     base_attack: int
     base_defense: int
     base_luck: int
-    min_rarity: Rarity = Rarity.COMMON
+    min_rarity: "RarityTier"
 
-    def roll(self, rng: random.Random, rarity: Rarity) -> "Equipment":
+    @property
+    def etype(self) -> EquipmentType:
+        return EquipmentType.from_key(self.slot) or EquipmentType.WEAPON
+
+    def roll(self, rng: random.Random, rarity: "RarityTier") -> "Equipment":
         """Roll a concrete instance at `rarity` with small variance."""
         spread = 0.85 + rng.random() * 0.3  # 85%..115% of base
         mult = rarity.stat_multiplier
@@ -64,7 +80,7 @@ class Equipment:
     key: str
     name: str
     etype: EquipmentType
-    rarity: Rarity
+    rarity: "RarityTier"
     attack: int
     defense: int
     luck: int
@@ -102,14 +118,13 @@ class GachaCard:
 
     key: str
     name: str
-    rarity: Rarity
+    rarity: "RarityTier"
     lore: str = ""
     series: str = "Standard"
 
     @property
     def sell_value(self) -> int:
-        lo, hi = self.rarity.value_range
-        return (lo + hi) // 2
+        return self.rarity.sell_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,76 +133,6 @@ class HuntEnemy:
 
     key: str
     name: str
-    rarity: Rarity
+    rarity: "RarityTier"
     base_coins: int
     base_xp: int
-
-
-class _RegistryMeta(type):
-    """Metaclass collecting every declared instance into `cls._items`."""
-
-    def __new__(mcs, name: str, bases: tuple[type, ...], namespace: dict) -> "_RegistryMeta":
-        cls = super().__new__(mcs, name, bases, namespace)
-        cls._items = {}
-        return cls
-
-    def register(cls, item) -> None:
-        cls._items[item.key] = item
-
-    def get(cls, key: str):
-        return cls._items.get(key)
-
-    def __iter__(cls) -> Iterator:
-        return iter(cls._items.values())
-
-    def __contains__(cls, key: str) -> bool:
-        return key in cls._items
-
-    def __len__(cls) -> int:
-        return len(cls._items)
-
-
-class ItemRegistry(metaclass=_RegistryMeta):
-    """Namespace holding the global item registries."""
-
-    _items: ClassVar[dict] = {}
-
-    cards: ClassVar[dict[str, GachaCard]] = {}
-    equipment: ClassVar[dict[str, EquipmentTemplate]] = {}
-    enemies: ClassVar[dict[str, HuntEnemy]] = {}
-
-    @classmethod
-    def card(cls, key: str) -> GachaCard | None:
-        return cls.cards.get(key)
-
-    @classmethod
-    def equipment_template(cls, key: str) -> EquipmentTemplate | None:
-        return cls.equipment.get(key)
-
-    @classmethod
-    def enemy(cls, key: str) -> HuntEnemy | None:
-        return cls.enemies.get(key)
-
-    @classmethod
-    def all_cards(cls) -> list[GachaCard]:
-        return list(cls.cards.values())
-
-    @classmethod
-    def all_equipment(cls) -> list[EquipmentTemplate]:
-        return list(cls.equipment.values())
-
-    @classmethod
-    def all_enemies(cls) -> list[HuntEnemy]:
-        return list(cls.enemies.values())
-
-    @classmethod
-    def cards_by_rarity(cls, rarity: Rarity) -> list[GachaCard]:
-        return [c for c in cls.cards.values() if c.rarity == rarity]
-
-    @classmethod
-    def equipment_by_rarity(cls, rarity: Rarity) -> list[EquipmentTemplate]:
-        return [e for e in cls.equipment.values() if e.min_rarity <= rarity]
-
-    @classmethod
-    def enemies_by_rarity(cls, rarity: Rarity) -> list[HuntEnemy]:
-        return [e for e in cls.enemies.values() if e.rarity == rarity]

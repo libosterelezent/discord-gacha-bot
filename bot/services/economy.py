@@ -1,66 +1,127 @@
 """Economy service: balances, transfers, daily/work rewards, gambling.
 
 All mutations happen inside a DB transaction and are appended to the
-`economy_log` audit table.
+`economy_log` audit table, and published to the event bus for the
+maintainer logging sink. Every operation is **scope-aware**: in
+guild-scoped mode (default) balances are per-server; global mode maps
+everything onto the sentinel guild ``0`` via :func:`scope_id`.
 """
 from __future__ import annotations
 
 import random
-from typing import Iterable
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Literal
 
-from bot.config import CONFIG, CONSTANTS
-from bot.core.database import Database
-from bot.core.decorators import rate_limited, timed
+from sqlalchemy import text
+
+from bot.core.decorators import timed
+from bot.core.events import GameEvent
 from bot.core.exceptions import (
-    CooldownError,
+    GachaBotError,
     InsufficientFundsError,
     NegativeAmountError,
     PlayerNotFoundError,
 )
 from bot.models.player import Player
 from bot.services.base import BaseService
-from bot.services.upgrades import UpgradeCatalog
-
-_IN_MEMORY_COOLDOWNS: dict[tuple[int, str], float] = {}
 
 
-def _cooldown(user_id: int, action: str) -> float:
-    """Seconds remaining for (user, action); 0.0 when ready."""
-    import time
+if TYPE_CHECKING:
+    from bot.config import GameSettings
 
-    until = _IN_MEMORY_COOLDOWNS.get((user_id, action), 0.0)
-    return max(0.0, until - time.monotonic())
+GLOBAL_GUILD_ID: int = 0  # sentinel scope for global economy mode
+
+Scope = Literal["guild", "global"]
 
 
-def _set_cooldown(user_id: int, action: str, seconds: float) -> None:
-    import time
+def scope_id(guild_id: int | None, settings: "GameSettings") -> int:
+    """Resolve the storage scope: guild rows, or the global sentinel."""
+    if settings.economy.scope == "global" or guild_id is None:
+        return GLOBAL_GUILD_ID
+    return int(guild_id)
 
-    _IN_MEMORY_COOLDOWNS[(user_id, action)] = time.monotonic() + seconds
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+# -- shared SQL fragments (named binds, portable across sqlite/postgres) --------
+
+_SQL_UPSERT_PLAYER = text(
+    """
+    INSERT INTO players (guild_id, user_id, balance, created_at, updated_at)
+    VALUES (:g, :u, :b, :t, :t)
+    ON CONFLICT DO NOTHING
+    """
+)
+_SQL_UPSERT_GLOBAL_USER = text(
+    """
+    INSERT INTO global_users (user_id, first_seen, last_seen)
+    VALUES (:u, :t, :t)
+    ON CONFLICT (user_id) DO UPDATE SET last_seen = :t
+    """
+)
+_SQL_ADD_BALANCE = text(
+    """
+    UPDATE players SET balance = balance + :d, updated_at = :t
+    WHERE guild_id = :g AND user_id = :u
+    """
+)
+_SQL_SELECT_BALANCE = text(
+    "SELECT balance FROM players WHERE guild_id = :g AND user_id = :u"
+)
+_SQL_INSERT_ECO_LOG = text(
+    """
+    INSERT INTO economy_log (guild_id, user_id, delta, reason, balance_after, created_at)
+    VALUES (:g, :u, :d, :r, :b, :t)
+    """
+)
 
 
 class EconomyService(BaseService):
     log_name = "gacha.economy"
 
     async def on_start(self) -> None:
-        self.log.info("Economy service ready")
+        self.log.info("Economy service ready (scope=%s)", self.settings.economy.scope)
 
-    # -- player lifecycle ----------------------------------------------------
+    # -- events ------------------------------------------------------------------
 
-    @timed()
-    async def ensure_player(self, user_id: int) -> Player:
-        """Get-or-create the player aggregate (UPSERT semantics)."""
-        row = await self.db.fetch_one("SELECT * FROM players WHERE user_id = ?", (str(user_id),))
-        if row is None:
-            await self.db.execute(
-                "INSERT OR IGNORE INTO players (user_id, balance) VALUES (?, ?)",
-                (str(user_id), CONFIG.starting_balance),
+    async def _publish(
+        self, category: str, action: str, guild_id: int | None, user_id: int, message: str, **fields: object
+    ) -> None:
+        await self.bus.publish(
+            GameEvent(
+                category=category, action=action, guild_id=guild_id, user_id=user_id,
+                message=message, fields=fields,
             )
-            row = await self.db.fetch_one("SELECT * FROM players WHERE user_id = ?", (str(user_id),))
-            self.log.info("Created new player user=%s", user_id)
+        )
+
+    # -- player lifecycle ----------------------------------------------------------
+
+    async def ensure_player(self, guild_id: int | None, user_id: int) -> Player:
+        """Get-or-create the player aggregate (UPSERT semantics)."""
+        scope = scope_id(guild_id, self.settings)
+        row = await self.db.fetch_one(
+            "SELECT * FROM players WHERE guild_id = :g AND user_id = :u", {"g": scope, "u": user_id}
+        )
+        if row is None:
+            now = _now_iso()
+            async with self.db.transaction() as conn:
+                await conn.execute(
+                    _SQL_UPSERT_PLAYER,
+                    {"g": scope, "u": user_id, "b": self.settings.economy.starting_balance, "t": now},
+                )
+                await conn.execute(_SQL_UPSERT_GLOBAL_USER, {"u": user_id, "t": now})
+            row = await self.db.fetch_one(
+                "SELECT * FROM players WHERE guild_id = :g AND user_id = :u", {"g": scope, "u": user_id}
+            )
+            self.log.info("Created new player guild=%s user=%s", scope, user_id)
         if row is None:  # pragma: no cover - should be impossible
             raise PlayerNotFoundError()
+
         player = Player(
             user_id=user_id,
+            guild_id=scope,
             balance=row["balance"],
             shards=row["shards"],
             xp=row["xp"],
@@ -68,99 +129,104 @@ class EconomyService(BaseService):
             total_pulls=row["total_pulls"],
             pity_counter=row["pity_counter"],
         )
-        # hydrate upgrades
         rows = await self.db.fetch_all(
-            "SELECT upgrade_key, level FROM upgrades WHERE user_id = ?", (str(user_id),)
+            "SELECT upgrade_key, level FROM upgrades WHERE guild_id = :g AND user_id = :u",
+            {"g": scope, "u": user_id},
         )
         player.upgrades = {r["upgrade_key"]: r["level"] for r in rows}
         return player
 
-    # -- balance ops -----------------------------------------------------------
+    # -- balance ops ----------------------------------------------------------------
 
-    async def _apply_delta(self, user_id: int, delta: int, reason: str) -> int:
+    async def _apply_delta(self, guild_id: int | None, user_id: int, delta: int, reason: str) -> int:
         """Atomically adjust balance; returns the new balance."""
+        scope = scope_id(guild_id, self.settings)
+        now = _now_iso()
         async with self.db.transaction() as conn:
-            cur = await conn.execute(
-                "UPDATE players SET balance = balance + ?, updated_at = datetime('now') WHERE user_id = ?",
-                (delta, str(user_id)),
+            result = await conn.execute(
+                _SQL_ADD_BALANCE, {"g": scope, "u": user_id, "d": delta, "t": now}
             )
-            if cur.rowcount == 0:
+            if result.rowcount == 0:
                 raise PlayerNotFoundError()
-            row = await conn.execute("SELECT balance FROM players WHERE user_id = ?", (str(user_id),))
-            new_balance = (await row.fetchone())[0]
+            new_balance = (await conn.execute(_SQL_SELECT_BALANCE, {"g": scope, "u": user_id})).scalar_one()
             if new_balance < 0:
-                raise InsufficientFundsError(-delta, new_balance - delta)
+                raise InsufficientFundsError(-delta, int(new_balance) - delta)
             await conn.execute(
-                "INSERT INTO economy_log (user_id, delta, reason, balance_after) VALUES (?, ?, ?, ?)",
-                (str(user_id), delta, reason, new_balance),
+                _SQL_INSERT_ECO_LOG,
+                {"g": scope, "u": user_id, "d": delta, "r": reason, "b": int(new_balance), "t": now},
             )
+        return int(new_balance)
+
+    async def deposit(self, guild_id: int | None, user_id: int, amount: int, reason: str = "deposit") -> int:
+        if amount <= 0:
+            raise NegativeAmountError()
+        new_balance = await self._apply_delta(guild_id, user_id, amount, reason)
+        await self._publish("economy", "deposit", guild_id, user_id, f"+{amount:,} ({reason}) \u2192 {new_balance:,}")
         return new_balance
 
-    async def deposit(self, user_id: int, amount: int, reason: str = "deposit") -> int:
+    async def withdraw(self, guild_id: int | None, user_id: int, amount: int, reason: str = "withdraw") -> int:
         if amount <= 0:
             raise NegativeAmountError()
-        return await self._apply_delta(user_id, amount, reason)
+        new_balance = await self._apply_delta(guild_id, user_id, -amount, reason)
+        await self._publish("economy", "withdraw", guild_id, user_id, f"-{amount:,} ({reason}) \u2192 {new_balance:,}")
+        return new_balance
 
-    async def withdraw(self, user_id: int, amount: int, reason: str = "withdraw") -> int:
-        if amount <= 0:
-            raise NegativeAmountError()
-        return await self._apply_delta(user_id, -amount, reason)
-
-    async def balance(self, user_id: int) -> int:
-        val = await self.db.fetch_val("SELECT balance FROM players WHERE user_id = ?", (str(user_id),))
+    async def balance(self, guild_id: int | None, user_id: int) -> int:
+        scope = scope_id(guild_id, self.settings)
+        val = await self.db.fetch_val(
+            "SELECT balance FROM players WHERE guild_id = :g AND user_id = :u", {"g": scope, "u": user_id}
+        )
         return int(val or 0)
 
-    async def transfer(self, sender: Player, recipient_id: int, amount: int) -> int:
+    async def transfer(self, guild_id: int | None, sender: Player, recipient_id: int, amount: int) -> int:
         if amount <= 0:
             raise NegativeAmountError()
         if sender.user_id == recipient_id:
-            from bot.core.exceptions import GachaBotError
             raise GachaBotError("You cannot pay yourself.")
         if sender.balance < amount:
             raise InsufficientFundsError(amount, sender.balance)
-        await self.ensure_player(recipient_id)
+        scope = scope_id(guild_id, self.settings)
+        await self.ensure_player(guild_id, recipient_id)
+        now = _now_iso()
         async with self.db.transaction() as conn:
+            await conn.execute(_SQL_ADD_BALANCE, {"g": scope, "u": sender.user_id, "d": -amount, "t": now})
+            await conn.execute(_SQL_ADD_BALANCE, {"g": scope, "u": recipient_id, "d": amount, "t": now})
             await conn.execute(
-                "UPDATE players SET balance = balance - ? WHERE user_id = ?", (amount, str(sender.user_id))
-            )
-            await conn.execute(
-                "UPDATE players SET balance = balance + ? WHERE user_id = ?", (amount, str(recipient_id))
-            )
-            await conn.execute(
-                "INSERT INTO economy_log (user_id, delta, reason, balance_after) VALUES (?, ?, ?, ?)",
-                (str(sender.user_id), -amount, f"transfer->{recipient_id}", sender.balance - amount),
+                _SQL_INSERT_ECO_LOG,
+                {"g": scope, "u": sender.user_id, "d": -amount, "r": f"transfer->{recipient_id}", "b": sender.balance - amount, "t": now},
             )
         sender.balance -= amount
-        self.log.info("transfer %s -> %s (%d coins)", sender.user_id, recipient_id, amount)
+        await self._publish(
+            "economy", "transfer", guild_id, sender.user_id,
+            f"sent {amount:,} to <@{recipient_id}>", recipient=recipient_id, amount=amount,
+        )
         return sender.balance
 
-    # -- rewards ----------------------------------------------------------------
+    # -- rewards -----------------------------------------------------------------------
 
-    async def daily(self, player: Player) -> int:
-        remaining = _cooldown(player.user_id, "daily")
-        if remaining > 0:
-            raise CooldownError(remaining / 3600, unit="hours")
-        reward = CONFIG.daily_reward + player.level * 25
-        await self._apply_delta(player.user_id, reward, "daily")
-        _set_cooldown(player.user_id, "daily", CONFIG.daily_cooldown_hours * 3600)
-        self.log.info("user=%s daily +%d", player.user_id, reward)
+    async def daily(self, guild_id: int | None, player: Player) -> int:
+        self.cooldowns.check(player.guild_id, player.user_id, "daily")
+        reward = self.settings.economy.daily_reward + player.level * self.settings.economy.daily_level_bonus
+        await self._apply_delta(guild_id, player.user_id, reward, "daily")
+        self.cooldowns.trigger(player.guild_id, player.user_id, "daily")
+        await self._publish("economy", "daily", guild_id, player.user_id, f"claimed daily +{reward:,}")
         return reward
 
-    @rate_limited(window_seconds=3600, max_calls=1, key_arg="user_id")
-    async def work(self, player: Player) -> int:
-        remaining = _cooldown(player.user_id, "work")
-        if remaining > 0:
-            raise CooldownError(remaining, unit="seconds")
-        amount = random.randint(CONFIG.work_min, CONFIG.work_max)
-        profile_bonus = player.upgrades.get("greed", 0) * UpgradeCatalog.get("greed").effect_per_level
+    @timed()
+    async def work(self, guild_id: int | None, player: Player) -> int:
+        self.cooldowns.check(player.guild_id, player.user_id, "work")
+        amount = random.randint(self.settings.economy.work_min, self.settings.economy.work_max)
+        greed = self.content.upgrade("greed")
+        profile_bonus = player.upgrades.get("greed", 0) * (greed.effect_per_level if greed else 0.0)
         amount = int(amount * (1 + profile_bonus))
-        await self._apply_delta(player.user_id, amount, "work")
-        _set_cooldown(player.user_id, "work", CONFIG.work_cooldown_seconds)
+        await self._apply_delta(guild_id, player.user_id, amount, "work")
+        self.cooldowns.trigger(player.guild_id, player.user_id, "work")
+        await self._publish("economy", "work", guild_id, player.user_id, f"worked for +{amount:,}")
         return amount
 
-    # -- gamble -------------------------------------------------------------------
+    # -- gamble ---------------------------------------------------------------------------
 
-    async def gamble(self, player: Player, amount: int) -> int:
+    async def gamble(self, guild_id: int | None, player: Player, amount: int) -> int:
         """50/50 double-or-nothing. Returns delta (positive = won)."""
         if amount <= 0:
             raise NegativeAmountError()
@@ -168,24 +234,51 @@ class EconomyService(BaseService):
             raise InsufficientFundsError(amount, player.balance)
         won = random.random() < 0.5
         delta = amount if won else -amount
-        await self._apply_delta(player.user_id, delta, "gamble")
-        self.log.info("user=%s gamble %s (%+d)", player.user_id, "won" if won else "lost", delta)
+        await self._apply_delta(guild_id, player.user_id, delta, "gamble")
+        await self._publish(
+            "economy", "gamble", guild_id, player.user_id,
+            f"{'won' if won else 'lost'} {amount:,}", won=won, amount=amount,
+        )
         return delta
 
-    # -- leaderboard ----------------------------------------------------------------
+    # -- leaderboards ------------------------------------------------------------------------
 
-    async def leaderboard(self, limit: int = 10) -> list[tuple[int, int, int]]:
-        """Returns rows of (user_id, balance, level) ordered by balance."""
+    async def leaderboard(self, guild_id: int | None, limit: int = 10, scope: Scope = "guild") -> list[tuple[int, int, int]]:
+        """Rows of (user_id, balance, level) ordered by balance.
+
+        ``scope='global'`` aggregates per-user totals across all guilds.
+        """
+        if scope == "global":
+            rows = await self.db.fetch_all(
+                """
+                SELECT user_id, SUM(balance) AS balance, MAX(level) AS level
+                FROM players GROUP BY user_id
+                ORDER BY balance DESC LIMIT :lim
+                """,
+                {"lim": limit},
+            )
+            return [(int(r["user_id"]), int(r["balance"]), int(r["level"])) for r in rows]
+        effective = scope_id(guild_id, self.settings)
         rows = await self.db.fetch_all(
-            "SELECT user_id, balance, level FROM players ORDER BY balance DESC LIMIT ?", (limit,)
+            """
+            SELECT user_id, balance, level FROM players
+            WHERE guild_id = :g ORDER BY balance DESC LIMIT :lim
+            """,
+            {"g": effective, "lim": limit},
         )
-        return [(int(r["user_id"]), r["balance"], r["level"]) for r in rows]
+        return [(int(r["user_id"]), int(r["balance"]), int(r["level"])) for r in rows]
 
     async def add_xp_and_level(self, player: Player, xp_gain: int) -> int | None:
         """Persist XP/level changes. Returns new level if levelled up."""
         levelled = player.add_xp(xp_gain)
         await self.db.execute(
-            "UPDATE players SET xp = ?, level = ?, updated_at = datetime('now') WHERE user_id = ?",
-            (player.xp, player.level, str(player.user_id)),
+            """
+            UPDATE players SET xp = :xp, level = :lvl, updated_at = :t
+            WHERE guild_id = :g AND user_id = :u
+            """,
+            {
+                "xp": player.xp, "lvl": player.level, "t": _now_iso(),
+                "g": player.guild_id, "u": player.user_id,
+            },
         )
         return player.level if levelled else None

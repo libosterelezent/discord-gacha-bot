@@ -2,34 +2,43 @@
 
 Hunt flow
 ---------
-1. Cooldown check (scaled by Swiftness upgrade).
-2. Enemy rarity roll tilted by luck; pick enemy of that rarity.
+1. Cooldown check (duration from game.json, scaled by Swiftness).
+2. Enemy rarity roll via the content registry's spawn algorithm,
+   tilted by luck; pick enemy of that rarity.
 3. Success check: player power vs enemy tier + luck jitter.
 4. Rewards: coins (Greed/level multipliers), XP, equipment drop chance,
    rare card drop chance for high-tier kills.
+
+Enemies, equipment and rarities all come from the content registry —
+new content appears in hunts without code changes.
 """
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
-from bot.config import CONFIG
-from bot.core.database import Database
+from sqlalchemy import text
+
 from bot.core.decorators import timed
-from bot.core.exceptions import CooldownError
-from bot.models.game_data import load_game_data
-from bot.models.items import Equipment, HuntEnemy, ItemRegistry
+from bot.core.events import GameEvent
+from bot.models.items import Equipment
 from bot.models.player import Player, StatProfile
-from bot.models.rarities import Rarity
 from bot.services.base import BaseService
-from bot.services.economy import EconomyService, _cooldown, _set_cooldown
 
-load_game_data()
+if TYPE_CHECKING:
+    from bot.config import GameSettings
+    from bot.content.registry import ContentRegistry
+    from bot.core.cooldowns import CooldownManager
+    from bot.core.database import Database
+    from bot.core.events import EventBus
+    from bot.models.items import HuntEnemy
 
 
 @dataclass(slots=True)
 class HuntResult:
-    enemy: HuntEnemy
+    enemy: "HuntEnemy"
     success: bool
     coins: int
     xp: int
@@ -46,62 +55,81 @@ class HuntResult:
         return f"\U0001f480 **{self.enemy.name}** {self.enemy.rarity.emoji} fought back and you fled..."
 
 
+_SQL_INSERT_EQUIPMENT = text(
+    """
+    INSERT INTO equipment (guild_id, user_id, item_key, slot, rarity, level, attack, defense, luck, obtained)
+    VALUES (:g, :u, :k, :s, :r, 0, :a, :d, :l, :t)
+    RETURNING id
+    """
+)
+_SQL_UPSERT_INVENTORY = text(
+    """
+    INSERT INTO inventory (guild_id, user_id, item_key, quantity) VALUES (:g, :u, :k, 1)
+    ON CONFLICT (guild_id, user_id, item_key) DO UPDATE SET quantity = quantity + 1
+    """
+)
+
+
 class HuntService(BaseService):
     log_name = "gacha.hunt"
 
-    def __init__(self, db: Database, economy: EconomyService, rng: random.Random | None = None) -> None:
+    def __init__(self, db: "Database", content: "ContentRegistry", settings: "GameSettings",
+                 bus: "EventBus", cooldowns: "CooldownManager", economy) -> None:
+        super().__init__(db, content, settings, bus, cooldowns)
         self.economy = economy
-        self._rng = rng or random.Random()
-        super().__init__(db)
+        self._rng = random.Random()
 
     async def on_start(self) -> None:
-        self.log.info("Hunt service ready (%d enemies)", len(ItemRegistry.all_enemies()))
+        self.log.info("Hunt service ready (%d enemies)", len(self.content.all_enemies()))
 
     # -- helpers -----------------------------------------------------------------
 
-    def cooldown_remaining(self, player: Player, profile: StatProfile) -> float:
-        return _cooldown(player.user_id, "hunt")
+    def cooldown_remaining(self, player: Player) -> float:
+        return self.cooldowns.remaining(player.guild_id, player.user_id, "hunt")
 
     def _effective_cooldown(self, profile: StatProfile) -> float:
-        return CONFIG.hunt_cooldown_seconds * profile.cooldown_multiplier
+        return self.settings.cooldown_seconds("hunt") * profile.cooldown_multiplier
 
-    def _pick_enemy(self, profile: StatProfile) -> HuntEnemy:
-        """Rarity roll tilted by luck, weighted towards reachability."""
-        tier_cap = min(Rarity.MYTHIC, Rarity(1 + profile.power // 60))
-        candidates = {r: Rarity.weights()[r] for r in Rarity if r <= tier_cap}
-        members = list(candidates)
-        weights = [candidates[r] * (1 + profile.luck) ** (r.value - 1) for r in members]
-        rarity = self._rng.choices(members, weights=weights, k=1)[0]
-        pool = ItemRegistry.enemies_by_rarity(rarity)
+    def _pick_enemy(self, profile: StatProfile) -> "HuntEnemy":
+        """Rarity roll tilted by luck, capped by the player's power."""
+        cap_tier = 1 + profile.power // self.settings.hunt.tier_cap_divisor
+        cap = self.content.tier_at_most(cap_tier)
+        candidates = [r for r in self.content.rarities if r.tier <= cap.tier]
+        weights = [r.weight for r in candidates]
+        # luck tilt towards higher tiers within reachable pool
+        tilted = [w * (1 + profile.luck) ** (r.tier - 1) for w, r in zip(weights, candidates)]
+        rarity = self._rng.choices(candidates, weights=tilted, k=1)[0]
+        pool = self.content.enemies_by_rarity(rarity)
+        if not pool:  # rarity has no enemies — fall back to any weaker ones
+            pool = [e for e in self.content.all_enemies() if e.rarity.tier <= rarity.tier]
         return self._rng.choice(pool)
 
-    def _enemy_power(self, enemy: HuntEnemy) -> int:
-        return 25 * enemy.rarity.value ** 2  # 25..900
+    def _enemy_power(self, enemy: "HuntEnemy") -> int:
+        return 25 * enemy.rarity.tier ** 2  # 25..900 for tiers 1..6
 
-    def _roll_equipment_drop(self, enemy: HuntEnemy, profile: StatProfile) -> Equipment | None:
-        base_chance = 0.06 + 0.02 * enemy.rarity.value
-        if self._rng.random() > base_chance + profile.luck * 0.15:
+    def _roll_equipment_drop(self, enemy: "HuntEnemy", profile: StatProfile) -> Equipment | None:
+        hunt = self.settings.hunt
+        base = hunt.equipment_drop_base + hunt.equipment_drop_per_tier * enemy.rarity.tier
+        if self._rng.random() > base + profile.luck * hunt.equipment_drop_luck_scale:
             return None
-        templates = [t for t in ItemRegistry.all_equipment() if t.min_rarity <= enemy.rarity]
+        templates = self.content.equipment_by_rarity(enemy.rarity)
         if not templates:
             return None
-        template = self._rng.choice(templates)
-        return template.roll(self._rng, enemy.rarity)
+        return self._rng.choice(templates).roll(self._rng, enemy.rarity)
 
-    def _roll_card_drop(self, enemy: HuntEnemy, profile: StatProfile) -> str | None:
-        chance = 0.015 * enemy.rarity.value + profile.luck * 0.05
+    def _roll_card_drop(self, enemy: "HuntEnemy", profile: StatProfile) -> str | None:
+        hunt = self.settings.hunt
+        chance = hunt.card_drop_per_tier * enemy.rarity.tier + profile.luck * hunt.card_drop_luck_scale
         if self._rng.random() > chance:
             return None
-        pool = ItemRegistry.cards_by_rarity(enemy.rarity)
+        pool = self.content.cards_by_rarity(enemy.rarity)
         return self._rng.choice(pool).key if pool else None
 
     # -- core -------------------------------------------------------------------
 
     @timed()
-    async def hunt(self, player: Player, profile: StatProfile) -> HuntResult:
-        remaining = _cooldown(player.user_id, "hunt")
-        if remaining > 0:
-            raise CooldownError(remaining, unit="seconds")
+    async def hunt(self, guild_id: int | None, player: Player, profile: StatProfile) -> HuntResult:
+        self.cooldowns.check(player.guild_id, player.user_id, "hunt")
 
         enemy = self._pick_enemy(profile)
         e_power = self._enemy_power(enemy)
@@ -128,31 +156,30 @@ class HuntService(BaseService):
             xp_reward = max(1, int(enemy.base_xp * 0.25))
 
         # persist rewards
-        await self.economy._apply_delta(player.user_id, coin_reward, f"hunt:{enemy.key}")
+        await self.economy._apply_delta(guild_id, player.user_id, coin_reward, f"hunt:{enemy.key}")
 
+        now = datetime.now(timezone.utc).isoformat()
         async with self.db.transaction() as conn:
             for item in drops:
-                cur = await conn.execute(
-                    """
-                    INSERT INTO equipment (user_id, item_key, slot, rarity, level, attack, defense, luck)
-                    VALUES (?, ?, ?, ?, 0, ?, ?, ?)
-                    """,
-                    (
-                        str(player.user_id), item.key, item.etype.key, item.rarity.key,
-                        item.attack, item.defense, item.luck,
-                    ),
-                )
-                item.db_id = cur.lastrowid
+                equip_id = (
+                    await conn.execute(
+                        _SQL_INSERT_EQUIPMENT,
+                        {
+                            "g": player.guild_id, "u": player.user_id, "k": item.key,
+                            "s": item.etype.key, "r": item.rarity.key,
+                            "a": item.attack, "d": item.defense, "l": item.luck, "t": now,
+                        },
+                    )
+                ).scalar_one()
+                item.db_id = int(equip_id)
             if card_key:
                 await conn.execute(
-                    """
-                    INSERT INTO inventory (user_id, item_key, quantity) VALUES (?, ?, 1)
-                    ON CONFLICT(user_id, item_key) DO UPDATE SET quantity = quantity + 1
-                    """,
-                    (str(player.user_id), card_key),
+                    _SQL_UPSERT_INVENTORY, {"g": player.guild_id, "u": player.user_id, "k": card_key}
                 )
 
-        _set_cooldown(player.user_id, "hunt", self._effective_cooldown(profile))
+        self.cooldowns.trigger(
+            player.guild_id, player.user_id, "hunt", scale=profile.cooldown_multiplier
+        )
         level_up = await self.economy.add_xp_and_level(player, xp_reward)
 
         result = HuntResult(
@@ -163,5 +190,14 @@ class HuntService(BaseService):
         self.log.info(
             "user=%s hunt %s enemy=%s coins=%+d xp=%+d drops=%d",
             player.user_id, "won" if success else "lost", enemy.key, coin_reward, xp_reward, len(drops),
+        )
+        await self.bus.publish(
+            GameEvent(
+                category="hunt", action="hunt", guild_id=guild_id, user_id=player.user_id,
+                message=f"{'defeated' if success else 'fled from'} {enemy.name} "
+                        f"({enemy.rarity.label}) — {coin_reward:+,} coins, +{xp_reward} XP",
+                colour=enemy.rarity.colour,
+                fields={"success": success, "enemy": enemy.key},
+            )
         )
         return result

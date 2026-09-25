@@ -1,28 +1,62 @@
 # 🎰 Gacha Hunter — Discord Gacha Game Bot
 
-A feature-complete Discord gacha game bot with a full player economy, a
-gacha banner with a real pity system, equippable & forgeable gear, hunts
+A modular Discord gacha game bot with a full player economy, a gacha
+banner with a real pity system, equippable & forgeable gear, hunts
 against rarity-tiered enemies, an automated **Huntbot** companion with
-offline progress, and permanent player upgrades.
+offline progress, permanent upgrades, **guild-scoped gameplay** with
+global badges, and a maintainer **event-logging** system.
 
-Built with **discord.py 2.x**, **aiosqlite** and Python 3.12+ (tested on
-3.14). Every command works as both a **prefix command** (`!pull`) and a
-**slash command** (`/pull`).
+Built with **discord.py 2.6+ (Components V2)**, **SQLAlchemy 2 async**
+(PostgreSQL or SQLite — same code) and Python 3.12+. Every command
+works as both a **prefix command** (`!pull`) and a **slash command**
+(`/pull`).
 
 ---
 
-## ✨ Features
+## ✨ Architecture
 
-| System | What it does |
-|---|---|
-| 🪙 **Economy** | Coins currency: balance, daily rewards, hourly work, player-to-player transfers, 50/50 gambling, server leaderboard. Every coin mutation is written to an audit log table. |
-| 🎲 **Gacha** | 6 rarity tiers (Common → Mythic) with weighted rolls, **soft pity** (Legendary odds ramp after pull 75), **hard pity** (guaranteed Legendary/Mythic at 90), duplicate pulls convert into ✨ **Shards** which buy discounted pulls, and a collectible card dex (15 unique cards across 5 series). |
-| ⚔️ **Equipment** | Weapons / Armor / Amulets with rolled attack / defense / luck stats, 6 rarity tiers with stat multipliers, equipping changes your effective combat profile, forging up to **+10** with compounding stat growth, selling for coins. |
-| 🎯 **Hunts** | Fight 10 enemy types from Field Mouse to Avatar of Ruin. Luck-tilted enemy rarity, power-based success rolls, coin/XP rewards, equipment & rare card drops, XP levels with escalating curve. |
-| 🤖 **Huntbot** | Buy once (🪙 15,000), upgrade forever (+10% income/level). While active it banks coins and rare equipment every cycle into a **battery-capped** pool you must `collect`. Goes **offline-capable**: progress made while the bot was down is reconciled from wall-clock time on boot. |
-| 🔧 **Upgrades** | 5 permanent perks with exponential cost curves: **Fortune** (luck), **Greed** (+5% coins/level), **Swiftness** (-2% cooldowns/level), **Battle Power**, **Harvest** (+4% huntbot yield/level). |
-| 📖 **Help menu** | Interactive **Components V2** menu (`!help`): gold Container with bot avatar thumbnail, a category **select menu** that swaps pages in-place, and a Home button. |
-| 📜 **Logging & safety** | Rotating file logs, per-command timing, sliding-window rate limiters, domain exception hierarchy mapped to friendly embeds, transaction rollback on any error. |
+The bot is split into independent layers so **adding content or
+features never touches the command interface**:
+
+| Layer | Location | Owns |
+|---|---|---|
+| 🧩 **Content** | `bot/content/data/*.json` | Cards, equipment, enemies, upgrades, badges and the **rarity table (incl. spawn weights)** — pure data, edit JSON to extend the game |
+| ⚙️ **Systems** | `bot/services/` | All game logic (economy, gacha, hunt, huntbot, equipment, upgrades, badges) — content-agnostic and Discord-free |
+| 🖥️ **Interface** | `bot/cogs/` + `bot/ui/` | Thin command adapters + Components V2 presentation builders; the **theme** (colours, footers, titles) lives in one place |
+| 🔎 **Observability** | `bot/observability/` | Routes domain events to Discord channels you pick, per category |
+| 🗄️ **Persistence** | `bot/core/database.py` | SQLAlchemy async engine — `DATABASE_URL` picks PostgreSQL or SQLite; versioned migrations included |
+
+**Extending the game = adding JSON.** A new card, weapon, enemy,
+badge, rarity tier (with its own spawn weight/colour/rewards) or
+upgrade is a new entry in `bot/content/data/`. Spawn behaviour is a
+pluggable algorithm selected in `config/game.json`
+(`spawn.algorithm`); new algorithms register with one decorator.
+
+### Maintainer tuning — `config/game.json`
+
+Every cooldown, cost curve, pity parameter, drop rate and currency
+name is maintainer-editable there, and **hot-reloadable** with
+`!reload_settings` — no restart, no code changes.
+
+### Guild vs global scope
+
+By default the economy is **guild-scoped**: each server has its own
+balances, leaderboards and cooldowns (no cross-server conflicts), while
+a global identity table powers cross-server badges and global
+rankings (`!leaderboard global`). Flip `economy.scope` to `"global"`
+in `config/game.json` for one shared economy across all servers — the
+schema supports both modes natively.
+
+### Rate limits & cooldowns
+
+* discord.py tracks Discord's per-route rate-limit buckets from the
+  `X-RateLimit-*` headers and pre-emptively waits — the bot never
+  hammers an endpoint into a 429.
+* The event-logging sink sends through a semaphore-capped queue with
+  explicit `RetryAfter` back-off and jitter; failed channel sends are
+  dropped-and-logged so logging can never stall gameplay.
+* All gameplay cooldowns (daily/work/hunt fixed timers, pull sliding
+  window) live in `config/game.json` and are scope-aware.
 
 ---
 
@@ -38,7 +72,7 @@ Prefix defaults to `!` (configurable). All commands also work as slash commands.
 | `!work` | — | Earn coins (hourly, boosted by Greed) |
 | `!pay <@user> <amount>` | `give` | Send coins to another player |
 | `!gamble <amount>` | — | 50/50 double-or-nothing |
-| `!leaderboard` | `lb`, `top` | Top 10 richest hunters |
+| `!leaderboard [guild\|global]` | `lb`, `top` | Top 10 richest hunters |
 
 ### 🎲 Gacha
 | Command | Aliases | Description |
@@ -53,7 +87,7 @@ Prefix defaults to `!` (configurable). All commands also work as slash commands.
 | Command | Aliases | Description |
 |---|---|---|
 | `!hunt` | — | Hunt a random enemy for coins, XP and loot (45s cooldown) |
-| `!profile [@user]` | `me`, `stats` | Full profile: stats, gear, pity, huntbot |
+| `!profile [@user]` | `me`, `stats` | Full profile: stats, gear, pity, huntbot, badges |
 | `!hunt_info` | — | How hunting, luck and cooldowns work |
 
 ### 🤖 Huntbot
@@ -80,16 +114,24 @@ Prefix defaults to `!` (configurable). All commands also work as slash commands.
 | `!upgrades` | Workshop: levels, effects, next-level costs |
 | `!upgrades buy <name>` | Buy one level, e.g. `!upgrades buy greed` |
 
-### 📖 Help
-| Command | Description |
-|---|---|
-| `help` | Interactive Components V2 menu — pick a category from the dropdown |
-
 ### 🛡️ Admin (owner only)
 | Command | Description |
 |---|---|
 | `!grant <@user> <amount>` | Mint coins for a player |
+| `!badges [@user]` | List badge definitions, or a player's badges |
+| `!badges grant <@user> <key>` | Award a badge (guild or global scope) |
+| `!badges revoke <@user> <key>` | Remove a badge |
+| `!logchannel set <category> #channel` | Route an event category to a channel |
+| `!logchannel remove <category>` | Stop logging a category |
+| `!logchannel list` | Show configured logging channels |
+| `!reload_settings` | Hot-reload `config/game.json` |
 | `!botstats` | Players, pulls, circulation, uptime, versions |
+
+**Log categories:** `economy`, `gacha`, `hunt`, `huntbot`,
+`equipment`, `upgrades`, `admin`, `error`, and `all` (wildcard).
+Events are best-effort: a channel without permissions is skipped, and
+setting `MAINTAINER_GUILD_ID` in `.env` mirrors **error** events to
+that guild's configured error channel from every server the bot is in.
 
 ---
 
@@ -112,6 +154,7 @@ Prefix defaults to `!` (configurable). All commands also work as slash commands.
 ```bash
 git clone https://github.com/libosterelezent/discord-gacha-bot.git
 cd discord-gacha-bot
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env      # Windows: copy .env.example .env
@@ -122,9 +165,13 @@ Edit `.env`:
 ```ini
 DISCORD_TOKEN=your-token-here
 COMMAND_PREFIX=!
+# SQLite for dev (zero setup):
+DATABASE_URL=sqlite+aiosqlite:///data/game.db
+# PostgreSQL for production:
+# DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/gacha
 # Optional:
-# DATABASE_PATH=/path/to/gacha.db
-# LOG_LEVEL=INFO          # DEBUG | INFO | WARNING | ERROR
+# MAINTAINER_GUILD_ID=123...   # guild that receives error logs centrally
+# LOG_LEVEL=INFO
 ```
 
 Start it:
@@ -134,8 +181,8 @@ python main.py
 ```
 
 Logs are written to `logs/gacha-bot.log` (rotating, 2 MB × 5 backups).
-The SQLite database is created automatically at `data/gacha.db` on first
-run — no migration steps needed.
+The database schema is created automatically on first run — no
+migration steps needed.
 
 ---
 
@@ -152,32 +199,41 @@ run — no migration steps needed.
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Project layout
 
 ```
 main.py                     entry point (logging, lifecycle)
+config/game.json            maintainer tuning (cooldowns, costs, pity, spawn)
 bot/
-├── config.py               frozen dataclass settings loaded from .env
+├── config.py               env config + typed game-settings loader (hot-reloadable)
+├── content/                JSON game content + registry + spawn algorithms
+│   └── data/               rarities / cards / equipment / enemies / upgrades / badges
 ├── core/
-│   ├── database.py         aiosqlite facade, async transactions, migrations
-│   ├── gacha_bot.py        Bot subclass: service graph, global error handlers
+│   ├── database.py         SQLAlchemy async facade, guild-scoped schema, migrations
+│   ├── gacha_bot.py        Bot subclass: service graph, event bus, error handlers
+│   ├── events.py           domain event bus (pub/sub with isolation)
+│   ├── cooldowns.py        maintainer-configurable, scope-aware cooldowns
+│   ├── ratelimit.py        RetryAfter-aware outbound limiter
 │   ├── logging_setup.py    rotating file + console logging
-│   ├── decorators.py       timing, rate limiting, error translation
+│   ├── decorators.py       timing, error translation, safe-run helpers
 │   └── exceptions.py       domain exception hierarchy
-├── models/                 enums, dataclasses, item registries, game content
-├── services/               all game logic (economy, gacha, hunt, huntbot…)
-├── cogs/                   thin Discord adapters (hybrid commands)
-└── utils/                  embed helpers
+├── models/                 player, stats, items (rarity = content data)
+├── services/               game logic: economy, gacha, hunt, huntbot,
+│                           equipment, upgrades, badges
+├── ui/                     theme (colours/footers), Components V2 builders,
+│                           interactive help (dropdown + buttons)
+├── observability/          Discord channel logging sink
+└── cogs/                   thin Discord adapters (hybrid commands)
 ```
 
-**Advanced Python concepts used:** `asyncio` background task with graceful
-cancellation · async context-manager transactions with auto
-commit/rollback · `asyncio.Lock` write serialisation + WAL mode · ABC
-service layer with dependency injection · frozen / slots dataclasses ·
-behavioural `IntEnum` · metaclass item registry · `ClassVar` · properties
-· factory & classmethods · sliding-window rate limiter decorator ·
-exception hierarchy mapped to user-facing embeds · versioned schema
-migrations · rotating log handlers with a custom formatter.
+**Advanced Python concepts used:** async SQLAlchemy with
+dialect-portable SQL and `RETURNING` inserts · async context-manager
+transactions with auto commit/rollback · pub/sub event bus with
+handler isolation · frozen / slots dataclasses · data-driven content
+registries with pluggable strategy algorithms · metaclass-free typed
+settings generated from JSON · sliding-window + fixed cooldown
+manager · Components V2 layout views · graceful global error handlers
+(prefix, slash and event layers).
 
 ## 📄 License
 

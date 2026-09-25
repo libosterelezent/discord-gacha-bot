@@ -3,39 +3,46 @@
 Model
 -----
 * Purchase once (level 1), then upgrade levels.
-* While *active*, every ``CONFIG.huntbot_tick_seconds`` it completes one
-  hunt cycle, banking coins (and occasionally equipment) into an
-  *unclaimed* pool capped by battery capacity — so owners must collect.
+* While *active*, every ``huntbot.tick_seconds`` it completes one hunt
+  cycle, banking coins (and occasionally equipment) into an *unclaimed*
+  pool capped by battery capacity — so owners must collect.
 * Offline progress: on boot, elapsed wall-clock is reconciled per bot,
   crediting up to a full battery of ticks that happened while away.
 
-An ``asyncio`` background task drives the loop; cancellation is handled
-gracefully on shutdown.
+All tuning (costs, tick length, battery, income) lives in game.json.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import random
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
-from bot.config import CONFIG
-from bot.core.database import Database
+from sqlalchemy import text
+
+from bot.core.events import GameEvent
 from bot.core.exceptions import HuntBotError, InsufficientFundsError
-from bot.models.items import Equipment, ItemRegistry
 from bot.models.player import Player
-from bot.models.rarities import Rarity
 from bot.services.base import BaseService
-from bot.services.upgrades import UpgradeCatalog
 
-HUNTBOT_COST_GROWTH: float = 1.6  # per-level upgrade cost growth
+if TYPE_CHECKING:
+    from bot.content.registry import ContentRegistry
+    from bot.core.cooldowns import CooldownManager
+    from bot.core.database import Database
+    from bot.core.events import EventBus
+    from bot.config import GameSettings
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass(slots=True)
 class HuntBotState:
     user_id: int
+    guild_id: int
     level: int
     active: bool
     battery: int
@@ -44,27 +51,44 @@ class HuntBotState:
     unclaimed_items: list[str]
     hunts_done: int
 
-    @property
-    def is_owned(self) -> bool:
-        return True
 
-    @property
-    def income_per_tick(self) -> int:
-        base = 35 + self.level * 15
-        return base
-
-    @property
-    def efficiency(self) -> float:
-        return 1.0 + self.level * 0.1
+_SQL_INSERT_BOT = text(
+    "INSERT INTO huntbots (guild_id, user_id, level, active, last_tick) VALUES (:g, :u, 1, 1, :t)"
+)
+_SQL_SPEND = text(
+    "UPDATE players SET balance = balance - :c, updated_at = :t WHERE guild_id = :g AND user_id = :u"
+)
+_SQL_ECO_LOG = text(
+    """
+    INSERT INTO economy_log (guild_id, user_id, delta, reason, balance_after, created_at)
+    VALUES (:g, :u, :d, :r, :b, :t)
+    """
+)
+_SQL_INSERT_EQUIPMENT = text(
+    """
+    INSERT INTO equipment (guild_id, user_id, item_key, slot, rarity, level, attack, defense, luck, obtained)
+    VALUES (:g, :u, :k, :s, :r, 0, :a, :d, :l, :t)
+    RETURNING id
+    """
+)
+_SQL_TICK_UPDATE = text(
+    """
+    UPDATE huntbots
+    SET unclaimed_coins = unclaimed_coins + :c, unclaimed_items = :i,
+        battery = MIN(battery + 1, :cap), last_tick = :t, hunts_done = hunts_done + 1
+    WHERE guild_id = :g AND user_id = :u
+    """
+)
 
 
 class HuntBotService(BaseService):
     log_name = "gacha.huntbot"
 
-    def __init__(self, db: Database, rng: random.Random | None = None) -> None:
+    def __init__(self, db: "Database", content: "ContentRegistry", settings: "GameSettings",
+                 bus: "EventBus", cooldowns: "CooldownManager", rng: random.Random | None = None) -> None:
+        super().__init__(db, content, settings, bus, cooldowns)
         self._rng = rng or random.Random()
         self._task: asyncio.Task | None = None
-        super().__init__(db)
 
     async def on_start(self) -> None:
         await self._reconcile_offline()
@@ -80,14 +104,27 @@ class HuntBotService(BaseService):
                 pass
             self.log.info("Huntbot loop stopped")
 
+    # -- income model ------------------------------------------------------------
+
+    def income_per_tick(self, level: int) -> int:
+        hb = self.settings.huntbot
+        return hb.base_income + level * hb.income_per_level
+
+    def efficiency(self, level: int) -> float:
+        return 1.0 + level * self.settings.huntbot.efficiency_per_level
+
     # -- state helpers -------------------------------------------------------------
 
-    async def get_state(self, user_id: int) -> HuntBotState | None:
-        row = await self.db.fetch_one("SELECT * FROM huntbots WHERE user_id = ?", (str(user_id),))
+    async def get_state(self, guild_id: int, user_id: int) -> HuntBotState | None:
+        row = await self.db.fetch_one(
+            "SELECT * FROM huntbots WHERE guild_id = :g AND user_id = :u",
+            {"g": guild_id, "u": user_id},
+        )
         if row is None:
             return None
         return HuntBotState(
             user_id=user_id,
+            guild_id=guild_id,
             level=row["level"],
             active=bool(row["active"]),
             battery=row["battery"],
@@ -97,8 +134,8 @@ class HuntBotService(BaseService):
             hunts_done=row["hunts_done"],
         )
 
-    async def require_state(self, user_id: int) -> HuntBotState:
-        state = await self.get_state(user_id)
+    async def require_state(self, guild_id: int, user_id: int) -> HuntBotState:
+        state = await self.get_state(guild_id, user_id)
         if state is None:
             raise HuntBotError("You don't own a huntbot yet — buy one with `!huntbot buy`.")
         return state
@@ -107,149 +144,156 @@ class HuntBotService(BaseService):
 
     def price(self, level: int) -> int:
         """Price of the next level (level 0 == purchase)."""
-        return int(CONFIG.huntbot_base_cost * HUNTBOT_COST_GROWTH ** level)
+        hb = self.settings.huntbot
+        return int(hb.base_cost * hb.cost_growth ** level)
 
-    async def buy(self, player: Player) -> int:
-        state = await self.get_state(player.user_id)
+    async def buy(self, guild_id: int | None, player: Player) -> int:
+        state = await self.get_state(player.guild_id, player.user_id)
         if state is not None:
             raise HuntBotError("You already own a huntbot — use `!huntbot upgrade`.")
         cost = self.price(0)
         if player.balance < cost:
             raise InsufficientFundsError(cost, player.balance)
+        now = _now_iso()
         async with self.db.transaction() as conn:
+            await conn.execute(_SQL_SPEND, {"c": cost, "t": now, "g": player.guild_id, "u": player.user_id})
+            await conn.execute(_SQL_INSERT_BOT, {"g": player.guild_id, "u": player.user_id, "t": now})
             await conn.execute(
-                "UPDATE players SET balance = balance - ? WHERE user_id = ?",
-                (cost, str(player.user_id)),
-            )
-            await conn.execute(
-                "INSERT INTO huntbots (user_id, level, active, last_tick) VALUES (?, 1, 1, ?)",
-                (str(player.user_id), self._now_iso()),
-            )
-            await conn.execute(
-                "INSERT INTO economy_log (user_id, delta, reason, balance_after) VALUES (?, ?, ?, ?)",
-                (str(player.user_id), -cost, "huntbot:buy", player.balance - cost),
+                _SQL_ECO_LOG,
+                {"g": player.guild_id, "u": player.user_id, "d": -cost, "r": "huntbot:buy", "b": player.balance - cost, "t": now},
             )
         player.balance -= cost
         self.log.info("user=%s bought huntbot (-%d)", player.user_id, cost)
+        await self.bus.publish(
+            GameEvent(category="huntbot", action="buy", guild_id=guild_id, user_id=player.user_id,
+                      message=f"bought huntbot (-{cost:,})")
+        )
         return cost
 
-    async def upgrade(self, player: Player) -> tuple[int, int]:
-        state = await self.require_state(player.user_id)
+    async def upgrade(self, guild_id: int | None, player: Player) -> tuple[int, int]:
+        state = await self.require_state(player.guild_id, player.user_id)
         cost = self.price(state.level)
         if player.balance < cost:
             raise InsufficientFundsError(cost, player.balance)
+        now = _now_iso()
         async with self.db.transaction() as conn:
+            await conn.execute(_SQL_SPEND, {"c": cost, "t": now, "g": player.guild_id, "u": player.user_id})
             await conn.execute(
-                "UPDATE players SET balance = balance - ? WHERE user_id = ?",
-                (cost, str(player.user_id)),
+                text("UPDATE huntbots SET level = level + 1 WHERE guild_id = :g AND user_id = :u"),
+                {"g": player.guild_id, "u": player.user_id},
             )
             await conn.execute(
-                "UPDATE huntbots SET level = level + 1 WHERE user_id = ?",
-                (str(player.user_id),),
-            )
-            await conn.execute(
-                "INSERT INTO economy_log (user_id, delta, reason, balance_after) VALUES (?, ?, ?, ?)",
-                (str(player.user_id), -cost, "huntbot:upgrade", player.balance - cost),
+                _SQL_ECO_LOG,
+                {"g": player.guild_id, "u": player.user_id, "d": -cost, "r": "huntbot:upgrade", "b": player.balance - cost, "t": now},
             )
         player.balance -= cost
         self.log.info("user=%s upgraded huntbot -> level %d (-%d)", player.user_id, state.level + 1, cost)
+        await self.bus.publish(
+            GameEvent(category="huntbot", action="upgrade", guild_id=guild_id, user_id=player.user_id,
+                      message=f"upgraded huntbot to level {state.level + 1} (-{cost:,})")
+        )
         return state.level + 1, cost
 
-    async def set_active(self, player: Player, active: bool) -> None:
-        state = await self.require_state(player.user_id)
+    async def set_active(self, guild_id: int | None, player: Player, active: bool) -> None:
+        state = await self.require_state(player.guild_id, player.user_id)
         if state.active == active:
             raise HuntBotError(f"Huntbot is already {'active' if active else 'idle'}.")
         await self.db.execute(
-            "UPDATE huntbots SET active = ?, last_tick = ? WHERE user_id = ?",
-            (1 if active else 0, self._now_iso(), str(player.user_id)),
+            "UPDATE huntbots SET active = :a, last_tick = :t WHERE guild_id = :g AND user_id = :u",
+            {"a": 1 if active else 0, "t": _now_iso(), "g": player.guild_id, "u": player.user_id},
         )
         self.log.info("user=%s huntbot active=%s", player.user_id, active)
+        await self.bus.publish(
+            GameEvent(category="huntbot", action="toggle", guild_id=guild_id, user_id=player.user_id,
+                      message=f"huntbot {'started' if active else 'stopped'}")
+        )
 
-    async def collect(self, player: Player, harvest_bonus: float = 0.0) -> tuple[int, list[Equipment]]:
+    async def collect(self, guild_id: int | None, player: Player, harvest_bonus: float = 0.0) -> tuple[int, list]:
         """Sweep unclaimed rewards into the player's balance/inventory."""
-        state = await self.require_state(player.user_id)
+        from bot.models.items import Equipment
+
+        state = await self.require_state(player.guild_id, player.user_id)
         coins = int(state.unclaimed_coins * (1 + harvest_bonus))
         items: list[Equipment] = []
         if not coins and not state.unclaimed_items:
             raise HuntBotError("Nothing to collect — the battery is still charging.")
 
+        now = _now_iso()
         async with self.db.transaction() as conn:
             if coins:
                 await conn.execute(
-                    "UPDATE players SET balance = balance + ?, updated_at = datetime('now') WHERE user_id = ?",
-                    (coins, str(player.user_id)),
+                    text("UPDATE players SET balance = balance + :c, updated_at = :t WHERE guild_id = :g AND user_id = :u"),
+                    {"c": coins, "t": now, "g": player.guild_id, "u": player.user_id},
                 )
                 await conn.execute(
-                    "INSERT INTO economy_log (user_id, delta, reason, balance_after) VALUES (?, ?, ?, ?)",
-                    (str(player.user_id), coins, "huntbot:collect", player.balance + coins),
+                    _SQL_ECO_LOG,
+                    {"g": player.guild_id, "u": player.user_id, "d": coins, "r": "huntbot:collect", "b": player.balance + coins, "t": now},
                 )
             for key in state.unclaimed_items:
-                template = ItemRegistry.equipment_template(key)
+                template = self.content.equipment_template(key)
                 if template is None:
                     continue
-                item = template.roll(self._rng, Rarity.COMMON)
-                cur = await conn.execute(
-                    """
-                    INSERT INTO equipment (user_id, item_key, slot, rarity, level, attack, defense, luck)
-                    VALUES (?, ?, ?, ?, 0, ?, ?, ?)
-                    """,
-                    (
-                        str(player.user_id), item.key, item.etype.key, item.rarity.key,
-                        item.attack, item.defense, item.luck,
-                    ),
-                )
-                item.db_id = cur.lastrowid
+                item = template.roll(self._rng, self.content.lowest_tier)
+                equip_id = (
+                    await conn.execute(
+                        _SQL_INSERT_EQUIPMENT,
+                        {
+                            "g": player.guild_id, "u": player.user_id, "k": item.key,
+                            "s": item.etype.key, "r": item.rarity.key,
+                            "a": item.attack, "d": item.defense, "l": item.luck, "t": now,
+                        },
+                    )
+                ).scalar_one()
+                item.db_id = int(equip_id)
                 items.append(item)
             await conn.execute(
-                """
-                UPDATE huntbots
-                SET unclaimed_coins = 0, unclaimed_items = '', battery = 0,
-                    last_tick = ?, hunts_done = hunts_done + ?
-                WHERE user_id = ?
-                """,
-                (self._now_iso(), state.battery, str(player.user_id)),
+                text(
+                    """
+                    UPDATE huntbots
+                    SET unclaimed_coins = 0, unclaimed_items = '', battery = 0,
+                        last_tick = :t, hunts_done = hunts_done + :h
+                    WHERE guild_id = :g AND user_id = :u
+                    """
+                ),
+                {"t": now, "h": state.battery, "g": player.guild_id, "u": player.user_id},
             )
         player.balance += coins
         self.log.info("user=%s collected %d coins, %d items from huntbot", player.user_id, coins, len(items))
+        await self.bus.publish(
+            GameEvent(category="huntbot", action="collect", guild_id=guild_id, user_id=player.user_id,
+                      message=f"collected {coins:,} coins + {len(items)} items")
+        )
         return coins, items
 
     # -- simulation --------------------------------------------------------------------
 
-    @staticmethod
-    def _now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat()
-
     def _simulate_tick(self, state: HuntBotState) -> tuple[int, list[str]]:
         """Return (coins, item_keys) produced by one hunt cycle."""
-        coins = state.income_per_tick
+        coins = self.income_per_tick(state.level)
         items: list[str] = []
-        if self._rng.random() < 0.08:
-            templates = ItemRegistry.all_equipment()
+        if self._rng.random() < self.settings.huntbot.item_drop_chance:
+            templates = self.content.all_equipment()
             items.append(self._rng.choice(templates).key)
         return coins, items
 
-    async def _tick_user(self, user_id: int, harvest_bonus: float) -> None:
-        state = await self.get_state(user_id)
+    async def _tick_user(self, guild_id: int, user_id: int, harvest_bonus: float) -> None:
+        state = await self.get_state(guild_id, user_id)
         if state is None or not state.active:
             return
-        if state.battery >= CONFIG.huntbot_battery_capacity:
+        if state.battery >= self.settings.huntbot.battery_capacity:
             return  # battery full; owner must collect
 
         gained_coins, gained_items = self._simulate_tick(state)
-        gained_coins = int(gained_coins * (1 + harvest_bonus) * state.efficiency)
-        new_items = (state.unclaimed_items + gained_items)[: CONFIG.huntbot_battery_capacity]
+        gained_coins = int(gained_coins * (1 + harvest_bonus) * self.efficiency(state.level))
+        new_items = (state.unclaimed_items + gained_items)[: self.settings.huntbot.battery_capacity]
 
         await self.db.execute(
-            """
-            UPDATE huntbots
-            SET unclaimed_coins = unclaimed_coins + ?, unclaimed_items = ?,
-                battery = MIN(battery + 1, ?), last_tick = ?, hunts_done = hunts_done + 1
-            WHERE user_id = ?
-            """,
-            (
-                gained_coins, json.dumps(new_items), CONFIG.huntbot_battery_capacity,
-                self._now_iso(), str(user_id),
-            ),
+            _SQL_TICK_UPDATE,
+            {
+                "c": gained_coins, "i": json.dumps(new_items),
+                "cap": self.settings.huntbot.battery_capacity,
+                "t": _now_iso(), "g": guild_id, "u": user_id,
+            },
         )
         self.log.debug("huntbot tick user=%s +%d coins %d items", user_id, gained_coins, len(gained_items))
 
@@ -258,21 +302,22 @@ class HuntBotService(BaseService):
         rows = await self.db.fetch_all("SELECT * FROM huntbots WHERE active = 1")
         now = datetime.now(timezone.utc)
         for row in rows:
+            guild_id, user_id = int(row["guild_id"]), int(row["user_id"])
             if not row["last_tick"]:
                 await self.db.execute(
-                    "UPDATE huntbots SET last_tick = ? WHERE user_id = ?",
-                    (self._now_iso(), row["user_id"]),
+                    "UPDATE huntbots SET last_tick = :t WHERE guild_id = :g AND user_id = :u",
+                    {"t": _now_iso(), "g": guild_id, "u": user_id},
                 )
                 continue
             last = datetime.fromisoformat(row["last_tick"])
             elapsed = (now - last).total_seconds()
-            ticks = int(elapsed // CONFIG.huntbot_tick_seconds)
+            ticks = int(elapsed // self.settings.huntbot.tick_seconds)
             if ticks <= 0:
                 continue
-            capacity_left = max(0, CONFIG.huntbot_battery_capacity - row["battery"])
+            capacity_left = max(0, self.settings.huntbot.battery_capacity - row["battery"])
             credited = min(ticks, capacity_left)
             state = HuntBotState(
-                user_id=int(row["user_id"]), level=row["level"], active=True,
+                user_id=user_id, guild_id=guild_id, level=row["level"], active=True,
                 battery=row["battery"], last_tick=last,
                 unclaimed_coins=row["unclaimed_coins"], unclaimed_items=[],
                 hunts_done=row["hunts_done"],
@@ -280,50 +325,54 @@ class HuntBotService(BaseService):
             coins, items = 0, []
             for _ in range(credited):
                 c, i = self._simulate_tick(state)
-                coins += int(c * state.efficiency)
+                coins += int(c * self.efficiency(state.level))
                 items.extend(i)
             items = items[:capacity_left]
             new_battery = row["battery"] + credited
-            advanced = last.timestamp() + credited * CONFIG.huntbot_tick_seconds
+            advanced = last.timestamp() + credited * self.settings.huntbot.tick_seconds
             await self.db.execute(
-                """
-                UPDATE huntbots
-                SET unclaimed_coins = unclaimed_coins + ?, unclaimed_items = ?,
-                    battery = ?, last_tick = ?, hunts_done = hunts_done + ?
-                WHERE user_id = ?
-                """,
-                (
-                    coins, json.dumps(list(dict.fromkeys(items))), new_battery,
-                    datetime.fromtimestamp(advanced, tz=timezone.utc).isoformat(),
-                    credited, row["user_id"],
+                text(
+                    """
+                    UPDATE huntbots
+                    SET unclaimed_coins = unclaimed_coins + :c, unclaimed_items = :i,
+                        battery = :b, last_tick = :t, hunts_done = hunts_done + :h
+                    WHERE guild_id = :g AND user_id = :u
+                    """
                 ),
+                {
+                    "c": coins, "i": json.dumps(list(dict.fromkeys(items))), "b": new_battery,
+                    "t": datetime.fromtimestamp(advanced, tz=timezone.utc).isoformat(),
+                    "h": credited, "g": guild_id, "u": user_id,
+                },
             )
             if credited:
                 self.log.info(
                     "offline reconcile user=%s credited %d ticks (+%d coins)",
-                    row["user_id"], credited, coins,
+                    user_id, credited, coins,
                 )
 
     async def _loop(self) -> None:
-        """Background heartbeat: tick every 60s, simulating due cycles."""
+        """Background heartbeat: tick every loop_interval, simulating due cycles."""
         try:
             while True:
-                await asyncio.sleep(60)
+                await asyncio.sleep(self.settings.huntbot.loop_interval)
                 try:
                     rows = await self.db.fetch_all(
                         """
-                        SELECT hb.user_id,
+                        SELECT hb.guild_id, hb.user_id,
                                COALESCE((SELECT level FROM upgrades
-                                         WHERE user_id = hb.user_id AND upgrade_key = 'harvest'), 0) AS harvest
+                                         WHERE guild_id = hb.guild_id AND user_id = hb.user_id
+                                           AND upgrade_key = 'harvest'), 0) AS harvest
                         FROM huntbots hb
-                        WHERE hb.active = 1 AND hb.battery < ?
+                        WHERE hb.active = 1 AND hb.battery < :cap
                         """,
-                        (CONFIG.huntbot_battery_capacity,),
+                        {"cap": self.settings.huntbot.battery_capacity},
                     )
+                    harvest_spec = self.content.upgrade("harvest")
                     for row in rows:
                         await self._tick_user(
-                            int(row["user_id"]),
-                            row["harvest"] * UpgradeCatalog.get("harvest").effect_per_level,
+                            int(row["guild_id"]), int(row["user_id"]),
+                            row["harvest"] * (harvest_spec.effect_per_level if harvest_spec else 0.0),
                         )
                 except Exception:
                     self.log.exception("huntbot loop iteration failed")

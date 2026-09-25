@@ -5,75 +5,87 @@ import discord
 from discord.ext import commands
 
 from bot.cogs.common import GameMixin
-from bot.utils.embeds import COLOUR_BAD, COLOUR_GOLD, base_embed, error_embed, money
+from bot.config import SETTINGS
+from bot.ui import components as ui
+from bot.ui.theme import Theme
 
 
 class EconomyCog(GameMixin):
     """\U0001f4b0 Economy & currency commands."""
 
+    CATEGORY_EMOJI = "\U0001fa99"
+    CATEGORY_LABEL = "Economy"
+
     @commands.hybrid_command(name="balance", aliases=["bal", "wallet"], description="Check your coin balance.")
     async def balance(self, ctx: commands.Context) -> None:
-        player, profile = await self.player_profile(ctx.author)
-        embed = base_embed(
-            f"\U0001f4b0 {ctx.author.display_name}'s Wallet",
-            f"{money(player.balance)}\n{chr(10024)} Shards: **{player.shards:,}**",
+        player, _ = await self.player_profile(ctx)
+        await ctx.reply(
+            ui.plain(
+                f"{SETTINGS.currency.emoji} **{ctx.author.display_name}** — "
+                f"**{player.balance:,}** {SETTINGS.currency.name.lower()} \u00b7 "
+                f"{SETTINGS.shards.emoji} **{player.shards:,}** {SETTINGS.shards.name.lower()}"
+            ),
+            mention_author=False,
         )
-        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="daily", description="Claim your daily reward (resets every 24h).")
     async def daily(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx.author)
-        reward = await self.bot.economy.daily(player)
-        embed = base_embed(
-            "\U0001f381 Daily Reward Claimed!",
-            f"You received {money(reward)}.\nCome back tomorrow for more!",
-            COLOUR_GOLD,
+        player, _ = await self.player_profile(ctx)
+        reward = await self.bot.economy.daily(self.scope_guild(ctx), player)
+        await ctx.reply(
+            embed=Theme.embed(
+                "\U0001f381 Daily Reward Claimed!",
+                f"You received {SETTINGS.money(reward)}.\nCome back tomorrow for more!",
+                Theme.success,
+            ),
+            mention_author=False,
         )
-        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="work", description="Work for coins (hourly).")
     async def work(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx.author)
-        earned = await self.bot.economy.work(player)
-        embed = base_embed(
-            "\U0001f4bc Hard Day's Work",
-            f"You earned {money(earned)}.",
+        player, _ = await self.player_profile(ctx)
+        earned = await self.bot.economy.work(self.scope_guild(ctx), player)
+        await ctx.reply(
+            ui.plain(f"\U0001f4bc You worked a shift and earned {SETTINGS.money(earned)}."),
+            mention_author=False,
         )
-        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="pay", aliases=["give"], description="Send coins to another player.")
+    @commands.guild_only()
     async def pay(self, ctx: commands.Context, member: discord.Member, amount: commands.Range[int, 1]) -> None:
-        player, _ = await self.player_profile(ctx.author)
-        new_balance = await self.bot.economy.transfer(player, member.id, amount)
-        embed = base_embed(
-            "\U0001f48c Transfer Complete",
-            f"{ctx.author.mention} \u2192 {member.mention}: {money(amount)}\nYour balance: {money(new_balance)}",
+        player, _ = await self.player_profile(ctx)
+        new_balance = await self.bot.economy.transfer(self.scope_guild(ctx), player, member.id, amount)
+        await ctx.reply(
+            ui.plain(
+                f"\U0001f48c {ctx.author.mention} \u2192 {member.mention}: {SETTINGS.money(amount)} "
+                f"(new balance: {SETTINGS.money(new_balance)})"
+            ),
+            mention_author=False,
         )
-        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="gamble", description="50/50 double or nothing.")
     async def gamble(self, ctx: commands.Context, amount: commands.Range[int, 1]) -> None:
-        player, _ = await self.player_profile(ctx.author)
-        delta = await self.bot.economy.gamble(player, amount)
+        player, _ = await self.player_profile(ctx)
+        delta = await self.bot.economy.gamble(self.scope_guild(ctx), player, amount)
         if delta > 0:
-            embed = base_embed(
-                "\U0001f0cf You Won!",
-                f"+{money(delta)}\nNew balance: {money(player.balance)}",
-                discord.Colour.green(),
+            await ctx.reply(
+                embed=Theme.embed("\U0001f0cf You Won!", f"+{SETTINGS.money(delta)}\nNew balance: {SETTINGS.money(player.balance)}", Theme.success),
+                mention_author=False,
             )
         else:
-            embed = base_embed(
-                "\U0001f0b2 You Lost...",
-                f"{money(delta)}\nNew balance: {money(player.balance)}",
-                COLOUR_BAD,
+            await ctx.reply(
+                embed=Theme.embed("\U0001f0b2 You Lost...", f"{SETTINGS.money(delta)}\nNew balance: {SETTINGS.money(player.balance)}", Theme.error),
+                mention_author=False,
             )
-        await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="leaderboard", aliases=["lb", "top"], description="Top 10 richest players.")
-    async def leaderboard(self, ctx: commands.Context) -> None:
-        rows = await self.bot.economy.leaderboard(10)
+    async def leaderboard(self, ctx: commands.Context, scope: str = "guild") -> None:
+        scope = scope.lower()
+        if scope not in ("guild", "global"):
+            scope = "guild"
+        rows = await self.bot.economy.leaderboard(self.scope_guild(ctx), 10, scope=scope)  # type: ignore[arg-type]
         if not rows:
-            await ctx.reply(embed=error_embed("No players yet — be the first!"), mention_author=False)
+            await ctx.reply(embed=Theme.error_embed("No players yet — be the first!"), mention_author=False)
             return
         medals = ("\U0001f947", "\U0001f948", "\U0001f949")
         lines = []
@@ -82,8 +94,8 @@ class EconomyCog(GameMixin):
             name = member.display_name if member else f"User {user_id}"
             prefix = medals[i - 1] if i <= 3 else f"`{i}.`"
             lines.append(f"{prefix} **{name}** \u2014 {bal:,} \u00b7 Lv.{level}")
-        embed = base_embed("\U0001f3c6 Wealthiest Hunters", "\n".join(lines), COLOUR_GOLD)
-        await ctx.reply(embed=embed, mention_author=False)
+        title = f" Wealthiest Hunters ({scope})"
+        await ctx.reply(view=ui.leaderboard_view(title.strip(), lines), mention_author=False)
 
 
 async def setup(bot) -> None:
