@@ -228,15 +228,7 @@ bot/
 └── cogs/                   thin Discord adapters (hybrid commands)
 ```
 
-**Advanced Python concepts used:** async SQLAlchemy with
-dialect-portable SQL and `RETURNING` inserts · async context-manager
-transactions with auto commit/rollback · pub/sub event bus with
-handler isolation · frozen / slots dataclasses · data-driven content
-registries with pluggable strategy algorithms · metaclass-free typed
-settings generated from JSON · sliding-window + fixed cooldown
-manager · Components V2 layout views · graceful global error handlers
-(prefix, slash and event layers).
-
+Currently in developement and there is not much functionality.
 ## 📄 License
 
 MIT — do whatever you want, attribution appreciated.
