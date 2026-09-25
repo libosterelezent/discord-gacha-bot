@@ -5,7 +5,6 @@ import platform
 import time
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from bot.cogs.common import GameMixin
@@ -25,7 +24,7 @@ class AdminCog(GameMixin):
     @commands.hybrid_command(name="grant", description="[OWNER] Grant coins to a player.")
     @is_owner()
     @commands.guild_only()
-    async def grant(self, ctx: commands.Context, member: discord.Member, amount: app_commands.Range[int, 1]) -> None:
+    async def grant(self, ctx: commands.Context, member: discord.Member, amount: commands.Range[int, 1]) -> None:
         new_balance = await self.bot.economy.deposit(member.id, amount, reason=f"grant:{ctx.author.id}")
         await ctx.reply(
             embed=base_embed("\U0001f4b0 Granted", f"{member.mention} received {money(amount)} (now {money(new_balance)})."),

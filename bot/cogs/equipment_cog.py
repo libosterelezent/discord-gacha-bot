@@ -4,7 +4,6 @@ from __future__ import annotations
 from typing import Any
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from bot.cogs.common import GameMixin
@@ -44,7 +43,7 @@ class EquipmentCog(GameMixin):
         await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="equip", description="Equip a piece of equipment by ID.")
-    async def equip(self, ctx: commands.Context, item_id: app_commands.Range[int, 1]) -> None:
+    async def equip(self, ctx: commands.Context, item_id: commands.Range[int, 1]) -> None:
         player, _ = await self.player_profile(ctx.author)
         piece = await self.bot.equipment.equip(player, item_id)
         await ctx.reply(
@@ -53,7 +52,7 @@ class EquipmentCog(GameMixin):
         )
 
     @commands.hybrid_command(name="unequip", description="Unequip a piece by ID.")
-    async def unequip(self, ctx: commands.Context, item_id: app_commands.Range[int, 1]) -> None:
+    async def unequip(self, ctx: commands.Context, item_id: commands.Range[int, 1]) -> None:
         player, _ = await self.player_profile(ctx.author)
         piece = await self.bot.equipment.unequip(player, item_id)
         await ctx.reply(
@@ -62,7 +61,7 @@ class EquipmentCog(GameMixin):
         )
 
     @commands.hybrid_command(name="upgequip", aliases=["forge"], description="Upgrade equipment (+1 level).")
-    async def upgequip(self, ctx: commands.Context, item_id: app_commands.Range[int, 1]) -> None:
+    async def upgequip(self, ctx: commands.Context, item_id: commands.Range[int, 1]) -> None:
         player, _ = await self.player_profile(ctx.author)
         piece, cost = await self.bot.equipment.upgrade(player, item_id)
         await ctx.reply(
@@ -75,7 +74,7 @@ class EquipmentCog(GameMixin):
         )
 
     @commands.hybrid_command(name="sellgear", description="Sell a piece of equipment for coins.")
-    async def sellgear(self, ctx: commands.Context, item_id: app_commands.Range[int, 1]) -> None:
+    async def sellgear(self, ctx: commands.Context, item_id: commands.Range[int, 1]) -> None:
         player, _ = await self.player_profile(ctx.author)
         piece, value = await self.bot.equipment.sell(player, item_id)
         await ctx.reply(

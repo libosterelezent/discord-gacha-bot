@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 
 from bot.cogs.common import GameMixin
@@ -43,7 +42,7 @@ class EconomyCog(GameMixin):
         await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="pay", aliases=["give"], description="Send coins to another player.")
-    async def pay(self, ctx: commands.Context, member: discord.Member, amount: app_commands.Range[int, 1]) -> None:
+    async def pay(self, ctx: commands.Context, member: discord.Member, amount: commands.Range[int, 1]) -> None:
         player, _ = await self.player_profile(ctx.author)
         new_balance = await self.bot.economy.transfer(player, member.id, amount)
         embed = base_embed(
@@ -53,7 +52,7 @@ class EconomyCog(GameMixin):
         await ctx.reply(embed=embed, mention_author=False)
 
     @commands.hybrid_command(name="gamble", description="50/50 double or nothing.")
-    async def gamble(self, ctx: commands.Context, amount: app_commands.Range[int, 1]) -> None:
+    async def gamble(self, ctx: commands.Context, amount: commands.Range[int, 1]) -> None:
         player, _ = await self.player_profile(ctx.author)
         delta = await self.bot.economy.gamble(player, amount)
         if delta > 0:
