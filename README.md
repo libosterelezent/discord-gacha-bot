@@ -21,6 +21,7 @@ Built with **discord.py 2.x**, **aiosqlite** and Python 3.12+ (tested on
 | 🎯 **Hunts** | Fight 10 enemy types from Field Mouse to Avatar of Ruin. Luck-tilted enemy rarity, power-based success rolls, coin/XP rewards, equipment & rare card drops, XP levels with escalating curve. |
 | 🤖 **Huntbot** | Buy once (🪙 15,000), upgrade forever (+10% income/level). While active it banks coins and rare equipment every cycle into a **battery-capped** pool you must `collect`. Goes **offline-capable**: progress made while the bot was down is reconciled from wall-clock time on boot. |
 | 🔧 **Upgrades** | 5 permanent perks with exponential cost curves: **Fortune** (luck), **Greed** (+5% coins/level), **Swiftness** (-2% cooldowns/level), **Battle Power**, **Harvest** (+4% huntbot yield/level). |
+| 📖 **Help menu** | Interactive **Components V2** menu (`!help`): gold Container with bot avatar thumbnail, a category **select menu** that swaps pages in-place, and a Home button. |
 | 📜 **Logging & safety** | Rotating file logs, per-command timing, sliding-window rate limiters, domain exception hierarchy mapped to friendly embeds, transaction rollback on any error. |
 
 ---
@@ -78,6 +79,11 @@ Prefix defaults to `!` (configurable). All commands also work as slash commands.
 |---|---|
 | `!upgrades` | Workshop: levels, effects, next-level costs |
 | `!upgrades buy <name>` | Buy one level, e.g. `!upgrades buy greed` |
+
+### 📖 Help
+| Command | Description |
+|---|---|
+| `help` | Interactive Components V2 menu — pick a category from the dropdown |
 
 ### 🛡️ Admin (owner only)
 | Command | Description |

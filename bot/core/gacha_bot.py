@@ -38,7 +38,7 @@ class GachaBot(commands.Bot):
         super().__init__(
             command_prefix=commands.when_mentioned_or(CONFIG.command_prefix),
             intents=intents,
-            help_command=commands.DefaultHelpCommand(no_category="General"),
+            help_command=None,  # replaced by the Components V2 menu (bot.cogs.help_cog)
             case_insensitive=True,
         )
 
@@ -92,6 +92,7 @@ class GachaBot(commands.Bot):
             "bot.cogs.equipment_cog",
             "bot.cogs.upgrade_cog",
             "bot.cogs.admin_cog",
+            "bot.cogs.help_cog",
         ):
             try:
                 await self.load_extension(extension)
