@@ -7,9 +7,9 @@ offline progress, permanent upgrades, **guild-scoped gameplay** with
 global badges, and a maintainer **event-logging** system.
 
 Built with **discord.py 2.6+ (Components V2)**, **SQLAlchemy 2 async**
-(PostgreSQL or SQLite — same code) and Python 3.12+. Every command
-works as both a **prefix command** (`!pull`) and a **slash command**
-(`/pull`).
+(PostgreSQL or SQLite — same code) and Python 3.12+. Commands work
+both as slash commands and as text commands using your server's
+configured prefix (see `.env` → `COMMAND_PREFIX`).
 
 ---
 
@@ -35,15 +35,15 @@ pluggable algorithm selected in `config/game.json`
 ### Maintainer tuning — `config/game.json`
 
 Every cooldown, cost curve, pity parameter, drop rate and currency
-name is maintainer-editable there, and **hot-reloadable** with
-`!reload_settings` — no restart, no code changes.
+name is maintainer-editable there, and **hot-reloadable** with the
+`reload_settings` command — no restart, no code changes.
 
 ### Guild vs global scope
 
 By default the economy is **guild-scoped**: each server has its own
 balances, leaderboards and cooldowns (no cross-server conflicts), while
 a global identity table powers cross-server badges and global
-rankings (`!leaderboard global`). Flip `economy.scope` to `"global"`
+rankings (`leaderboard global`). Flip `economy.scope` to `"global"`
 in `config/game.json` for one shared economy across all servers — the
 schema supports both modes natively.
 
@@ -62,70 +62,72 @@ schema supports both modes natively.
 
 ## 📖 Command List
 
-Prefix defaults to `!` (configurable). All commands also work as slash commands.
+Commands work as slash commands everywhere, and as text commands with
+your configured prefix (set `COMMAND_PREFIX` in `.env`). The default
+prefix is configurable by the maintainer.
 
 ### 🪙 Economy
 | Command | Aliases | Description |
 |---|---|---|
-| `!balance` | `bal`, `wallet` | Show your coin balance and shards |
-| `!daily` | — | Claim your daily reward (24h cooldown, scales with level) |
-| `!work` | — | Earn coins (hourly, boosted by Greed) |
-| `!pay <@user> <amount>` | `give` | Send coins to another player |
-| `!gamble <amount>` | — | 50/50 double-or-nothing |
-| `!leaderboard [guild\|global]` | `lb`, `top` | Top 10 richest hunters |
+| `balance` | `bal`, `wallet` | Show your coin balance and shards |
+| `daily` | — | Claim your daily reward (24h cooldown, scales with level) |
+| `work` | — | Earn coins (hourly, boosted by Greed) |
+| `pay <@user> <amount>` | `give` | Send coins to another player |
+| `gamble <amount>` | — | 50/50 double-or-nothing |
+| `leaderboard [guild\|global]` | `lb`, `top` | Top 10 richest hunters |
 
 ### 🎲 Gacha
 | Command | Aliases | Description |
 |---|---|---|
-| `!pull [1\|10]` | `gacha`, `wish` | Single pull 🪙100 or 10-pull 🪙900 (10% discount) |
-| `!collection [@user]` | `coll`, `dex` | View a card collection & dex progress |
-| `!sell_dupes` | — | Convert duplicate cards into coins |
-| `!shards` | — | Shard balance & info |
-| `!shards pull` | — | Spend shards on a pull (10 shards) |
+| `pull [1\|10]` | `gacha`, `wish` | Single pull 🪙100 or 10-pull 🪙900 (10% discount) |
+| `collection [@user]` | `coll`, `dex` | View a card collection & dex progress |
+| `sell_dupes` | — | Convert duplicate cards into coins |
+| `shards` | — | Shard balance & info |
+| `shards pull` | — | Spend shards on a pull (10 shards) |
 
 ### 🎯 Hunts & Profile
 | Command | Aliases | Description |
 |---|---|---|
-| `!hunt` | — | Hunt a random enemy for coins, XP and loot (45s cooldown) |
-| `!profile [@user]` | `me`, `stats` | Full profile: stats, gear, pity, huntbot, badges |
-| `!hunt_info` | — | How hunting, luck and cooldowns work |
+| `hunt` | — | Hunt a random enemy for coins, XP and loot (45s cooldown) |
+| `profile [@user]` | `me`, `stats` | Full profile: stats, gear, pity, huntbot, badges |
+| `hunt_info` | — | How hunting, luck and cooldowns work |
 
 ### 🤖 Huntbot
 | Command | Description |
 |---|---|
-| `!huntbot` / `!huntbot info` | Status: level, battery, banked rewards, next upgrade price |
-| `!huntbot buy` | Purchase your bot (activates it immediately) |
-| `!huntbot upgrade` | +1 level: more income & efficiency |
-| `!huntbot toggle` | Start / stop automatic hunting |
-| `!huntbot collect` | Sweep banked coins & items (resets battery) |
+| `huntbot` / `huntbot info` | Status: level, battery, banked rewards, next upgrade price |
+| `huntbot buy` | Purchase your bot (activates it immediately) |
+| `huntbot upgrade` | +1 level: more income & efficiency |
+| `huntbot toggle` | Start / stop automatic hunting |
+| `huntbot collect` | Sweep banked coins & items (resets battery) |
 
 ### ⚔️ Equipment
 | Command | Description |
 |---|---|
-| `!equipment` | List all gear (📮 = equipped) |
-| `!equip <id>` | Equip a piece (per-slot: weapon / armor / amulet) |
-| `!unequip <id>` | Unequip |
-| `!upgequip <id>` | Forge +1 level (compounding stats, up to +10) |
-| `!sellgear <id>` | Sell a piece for coins |
+| `equipment` | List all gear (📮 = equipped) |
+| `equip <id>` | Equip a piece (per-slot: weapon / armor / amulet) |
+| `unequip <id>` | Unequip |
+| `upgequip <id>` | Forge +1 level (compounding stats, up to +10) |
+| `sellgear <id>` | Sell a piece for coins |
 
 ### 🔧 Upgrades
 | Command | Description |
 |---|---|
-| `!upgrades` | Workshop: levels, effects, next-level costs |
-| `!upgrades buy <name>` | Buy one level, e.g. `!upgrades buy greed` |
+| `upgrades` | Workshop: levels, effects, next-level costs |
+| `upgrades buy <name>` | Buy one level, e.g. `upgrades buy greed` |
 
 ### 🛡️ Admin (owner only)
 | Command | Description |
 |---|---|
-| `!grant <@user> <amount>` | Mint coins for a player |
-| `!badges [@user]` | List badge definitions, or a player's badges |
-| `!badges grant <@user> <key>` | Award a badge (guild or global scope) |
-| `!badges revoke <@user> <key>` | Remove a badge |
-| `!logchannel set <category> #channel` | Route an event category to a channel |
-| `!logchannel remove <category>` | Stop logging a category |
-| `!logchannel list` | Show configured logging channels |
-| `!reload_settings` | Hot-reload `config/game.json` |
-| `!botstats` | Players, pulls, circulation, uptime, versions |
+| `grant <@user> <amount>` | Mint coins for a player |
+| `badges [@user]` | List badge definitions, or a player's badges |
+| `badges grant <@user> <key>` | Award a badge (guild or global scope) |
+| `badges revoke <@user> <key>` | Remove a badge |
+| `logchannel set <category> #channel` | Route an event category to a channel |
+| `logchannel remove <category>` | Stop logging a category |
+| `logchannel list` | Show configured logging channels |
+| `reload_settings` | Hot-reload `config/game.json` |
+| `botstats` | Players, pulls, circulation, uptime, versions |
 
 **Log categories:** `economy`, `gacha`, `hunt`, `huntbot`,
 `equipment`, `upgrades`, `admin`, `error`, and `all` (wildcard).
@@ -164,7 +166,7 @@ Edit `.env`:
 
 ```ini
 DISCORD_TOKEN=your-token-here
-COMMAND_PREFIX=!
+COMMAND_PREFIX=<your-prefix>
 # SQLite for dev (zero setup):
 DATABASE_URL=sqlite+aiosqlite:///data/game.db
 # PostgreSQL for production:
