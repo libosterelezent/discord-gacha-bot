@@ -90,12 +90,15 @@ _SQL_INSERT_EQUIPMENT = text(
 _SQL_APPLY_PULL = text(
     """
     UPDATE players
-    SET total_pulls = :tp, pity_counter = :pc, shards = :sh, balance = :bal, updated_at = :t
+    SET total_pulls = total_pulls + :n,
+        pity_counter = CASE WHEN :reset = 1 THEN :residual ELSE pity_counter + :n END,
+        shards = shards + :sh_delta,
+        balance = balance - :cost,
+        updated_at = :t
     WHERE guild_id = :g AND user_id = :u
+      AND balance >= :cost
+      AND shards + :sh_delta >= 0
     """
-)
-_SQL_SPEND_SHARDS = text(
-    "UPDATE players SET shards = shards - :sc WHERE guild_id = :g AND user_id = :u"
 )
 
 
@@ -226,23 +229,29 @@ class GachaService(BaseService):
 
                 session.add(outcome)
 
-            # persist counters & payment in the same transaction
-            new_balance = player.balance if use_shards else player.balance - cost
-            await conn.execute(
+            # persist counters & payment atomically: all deltas are relative
+            # and guarded so concurrent commands cannot corrupt state
+            shards_gained = session.shards_gained
+            sh_delta = shards_gained - shard_cost if use_shards else shards_gained
+            pay_cost = 0 if use_shards else cost
+            reset = any(o.pity_triggered for o in session.outcomes)
+            residual = player.pity_counter  # already post-loop value
+            result = await conn.execute(
                 _SQL_APPLY_PULL,
                 {
-                    "tp": player.total_pulls, "pc": player.pity_counter, "sh": player.shards,
-                    "bal": new_balance, "t": now, "g": player.guild_id, "u": player.user_id,
+                    "n": count, "reset": int(reset), "residual": residual,
+                    "sh_delta": sh_delta, "cost": pay_cost, "t": now,
+                    "g": player.guild_id, "u": player.user_id,
                 },
             )
-            if use_shards:
-                await conn.execute(
-                    _SQL_SPEND_SHARDS,
-                    {"sc": shard_cost, "g": player.guild_id, "u": player.user_id},
-                )
-                player.shards -= shard_cost
-            else:
-                player.balance = new_balance
+            if result.rowcount == 0:
+                # guard tripped: funds moved elsewhere since the snapshot
+                if use_shards:
+                    raise InsufficientFundsError(shard_cost, player.shards)
+                raise InsufficientFundsError(cost, player.balance)
+            player.total_pulls += count
+            player.shards += sh_delta
+            player.balance -= pay_cost
 
         self.log.info(
             "user=%s pulled x%d (cost=%d, shards=%s) best=%s new=%d",

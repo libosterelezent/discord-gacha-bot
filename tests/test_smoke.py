@@ -112,6 +112,24 @@ class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(o.pity_triggered for o in session.outcomes))
         self.assertEqual(player.pity_counter, 0)
 
+    async def test_gacha_pull_concurrent_payment_safe(self) -> None:
+        player = await self.economy.ensure_player(self.GUILD, 777)
+        await self.economy.deposit(self.GUILD, 777, 150, "test")
+        player = await self.economy.ensure_player(self.GUILD, 777)
+        start = player.balance
+        self.cooldowns._hits.clear()
+        p1 = await self.economy.ensure_player(self.GUILD, 777)
+        results = await asyncio.gather(
+            self.gacha.pull(self.GUILD, p1, 1),
+            self.gacha.pull(self.GUILD, p1, 1),
+            return_exceptions=True,
+        )
+        ok = [r for r in results if not isinstance(r, Exception)]
+        # both may succeed only if the balance covered both pulls
+        final = await self.economy.balance(self.GUILD, 777)
+        self.assertGreaterEqual(final, 0)
+        self.assertEqual(final, start - 100 * len(ok))
+
     async def test_hunt_roundtrip(self) -> None:
         from bot.models.player import StatProfile
 
