@@ -2,5 +2,8 @@ discord.py>=2.6
 SQLAlchemy[asyncio]>=2.0
 greenlet>=3.0
 aiosqlite>=0.20
-asyncpg>=0.30
 python-dotenv>=1.0
+
+# PostgreSQL backend — optional, only needed when DATABASE_URL points at
+# postgresql+asyncpg://... (SQLite needs none of it):
+# asyncpg>=0.30
