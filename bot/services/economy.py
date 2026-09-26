@@ -37,6 +37,10 @@ if TYPE_CHECKING:
 
 GLOBAL_GUILD_ID: int = 0  # sentinel scope for global economy mode
 
+#: hard ceiling for single ledger operations — anything larger would
+#: overflow the BIGINT storage columns on both SQLite and Postgres
+MAX_AMOUNT: int = 10**18
+
 Scope = Literal["guild", "global"]
 
 
@@ -134,6 +138,13 @@ class EconomyService(BaseService):
         player.upgrades = {r["upgrade_key"]: r["level"] for r in rows}
         return player
 
+    def _check_amount(self, amount: int) -> None:
+        """Reject non-positive and overflow-sized amounts up front."""
+        if amount <= 0:
+            raise NegativeAmountError()
+        if amount > MAX_AMOUNT:
+            raise GachaBotError("That amount is too large.")
+
     # -- balance ops ----------------------------------------------------------------
 
     async def _apply_delta(self, guild_id: int | None, user_id: int, delta: int, reason: str) -> int:
@@ -156,15 +167,13 @@ class EconomyService(BaseService):
         return int(new_balance)
 
     async def deposit(self, guild_id: int | None, user_id: int, amount: int, reason: str = "deposit") -> int:
-        if amount <= 0:
-            raise NegativeAmountError()
+        self._check_amount(amount)
         new_balance = await self._apply_delta(guild_id, user_id, amount, reason)
         await self._publish("economy", "deposit", guild_id, user_id, f"+{amount:,} ({reason}) \u2192 {new_balance:,}")
         return new_balance
 
     async def withdraw(self, guild_id: int | None, user_id: int, amount: int, reason: str = "withdraw") -> int:
-        if amount <= 0:
-            raise NegativeAmountError()
+        self._check_amount(amount)
         new_balance = await self._apply_delta(guild_id, user_id, -amount, reason)
         await self._publish("economy", "withdraw", guild_id, user_id, f"-{amount:,} ({reason}) \u2192 {new_balance:,}")
         return new_balance
@@ -177,8 +186,7 @@ class EconomyService(BaseService):
         return int(val or 0)
 
     async def transfer(self, guild_id: int | None, sender: Player, recipient_id: int, amount: int) -> int:
-        if amount <= 0:
-            raise NegativeAmountError()
+        self._check_amount(amount)
         if sender.user_id == recipient_id:
             raise GachaBotError("You cannot pay yourself.")
         if sender.balance < amount:
@@ -222,21 +230,31 @@ class EconomyService(BaseService):
 
     async def daily(self, guild_id: int | None, player: Player) -> int:
         self.cooldowns.check(player.guild_id, player.user_id, "daily")
-        reward = self.settings.economy.daily_reward + player.level * self.settings.economy.daily_level_bonus
-        await self._apply_delta(guild_id, player.user_id, reward, "daily")
+        # reserve the cooldown before any await-y side effect so two
+        # concurrent invocations cannot both pass the check
         await self.cooldowns.trigger(player.guild_id, player.user_id, "daily")
+        reward = self.settings.economy.daily_reward + player.level * self.settings.economy.daily_level_bonus
+        try:
+            await self._apply_delta(guild_id, player.user_id, reward, "daily")
+        except Exception:
+            await self.cooldowns.release(player.guild_id, player.user_id, "daily")
+            raise
         await self._publish("economy", "daily", guild_id, player.user_id, f"claimed daily +{reward:,}")
         return reward
 
     @timed()
     async def work(self, guild_id: int | None, player: Player) -> int:
         self.cooldowns.check(player.guild_id, player.user_id, "work")
+        await self.cooldowns.trigger(player.guild_id, player.user_id, "work")
         amount = self._rng.randint(self.settings.economy.work_min, self.settings.economy.work_max)
         greed = self.content.upgrade("greed")
         profile_bonus = player.upgrades.get("greed", 0) * (greed.effect_per_level if greed else 0.0)
         amount = int(amount * (1 + profile_bonus))
-        await self._apply_delta(guild_id, player.user_id, amount, "work")
-        await self.cooldowns.trigger(player.guild_id, player.user_id, "work")
+        try:
+            await self._apply_delta(guild_id, player.user_id, amount, "work")
+        except Exception:
+            await self.cooldowns.release(player.guild_id, player.user_id, "work")
+            raise
         await self._publish("economy", "work", guild_id, player.user_id, f"worked for +{amount:,}")
         return amount
 
@@ -244,8 +262,7 @@ class EconomyService(BaseService):
 
     async def gamble(self, guild_id: int | None, player: Player, amount: int) -> int:
         """50/50 double-or-nothing. Returns delta (positive = won)."""
-        if amount <= 0:
-            raise NegativeAmountError()
+        self._check_amount(amount)
         if player.balance < amount:
             raise InsufficientFundsError(amount, player.balance)
         won = self._rng.random() < 0.5
@@ -313,6 +330,8 @@ class EconomyService(BaseService):
         """Overwrite a player's balance (audited). Returns the new balance."""
         if amount < 0:
             raise NegativeAmountError()
+        if amount > MAX_AMOUNT:
+            raise GachaBotError("That amount is too large.")
         scope = scope_id(guild_id, self.settings)
         now = _now_iso()
         async with self.db.transaction() as conn:
@@ -343,6 +362,8 @@ class EconomyService(BaseService):
         """Overwrite a player's shard balance."""
         if amount < 0:
             raise NegativeAmountError()
+        if amount > MAX_AMOUNT:
+            raise GachaBotError("That amount is too large.")
         scope = scope_id(guild_id, self.settings)
         await self.db.execute(
             "UPDATE players SET shards = :s, updated_at = :t WHERE guild_id = :g AND user_id = :u",

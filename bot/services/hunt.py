@@ -117,7 +117,18 @@ class HuntService(BaseService):
     @timed()
     async def hunt(self, guild_id: int | None, player: Player, profile: StatProfile) -> HuntResult:
         self.cooldowns.check(player.guild_id, player.user_id, "hunt")
+        # reserve the cooldown before side effects: concurrent hunts must
+        # not both pass the check and double-credit rewards
+        await self.cooldowns.trigger(
+            player.guild_id, player.user_id, "hunt", scale=profile.cooldown_multiplier
+        )
+        try:
+            return await self._hunt_locked(guild_id, player, profile)
+        except Exception:
+            await self.cooldowns.release(player.guild_id, player.user_id, "hunt")
+            raise
 
+    async def _hunt_locked(self, guild_id: int | None, player: Player, profile: StatProfile) -> HuntResult:
         enemy = self._pick_enemy(profile)
         e_power = self._enemy_power(enemy)
 
@@ -164,9 +175,6 @@ class HuntService(BaseService):
                     _SQL_UPSERT_INVENTORY, {"g": player.guild_id, "u": player.user_id, "k": card_key}
                 )
 
-        await self.cooldowns.trigger(
-            player.guild_id, player.user_id, "hunt", scale=profile.cooldown_multiplier
-        )
         level_up = await self.economy.add_xp_and_level(player, xp_reward)
 
         result = HuntResult(

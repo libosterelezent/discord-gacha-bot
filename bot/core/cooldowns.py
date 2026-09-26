@@ -98,7 +98,13 @@ class CooldownManager:
             raise CooldownError(remaining)
 
     async def trigger(self, guild_id: int, user_id: int, action: str, *, scale: float = 1.0) -> float:
-        """Start (or restart) the fixed cooldown for `action` and persist it."""
+        """Start (or restart) the fixed cooldown for `action` and persist it.
+
+        The in-memory deadline is set synchronously before any await, so
+        callers can use this to *reserve* an action: fire it before any
+        side effects, and :meth:`release` on failure, to make
+        check-then-act sequences race-free.
+        """
         seconds = self._settings.cooldown_seconds(action) * scale
         deadline = time.time() + seconds
         self._until[self.key(guild_id, user_id, action)] = deadline
@@ -111,6 +117,15 @@ class CooldownManager:
                 {"g": guild_id, "u": user_id, "a": action, "t": _iso(deadline)},
             )
         return seconds
+
+    async def release(self, guild_id: int, user_id: int, action: str) -> None:
+        """Undo a reservation when the reserved operation failed."""
+        self._until.pop(self.key(guild_id, user_id, action), None)
+        if self._db is not None:
+            await self._db.execute(
+                "DELETE FROM cooldowns WHERE guild_id = :g AND user_id = :u AND action = :a",
+                {"g": guild_id, "u": user_id, "a": action},
+            )
 
     def _prune(self, *, now: float) -> None:
         """Drop expired in-memory deadlines so the map cannot grow forever."""
