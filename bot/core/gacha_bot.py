@@ -119,8 +119,10 @@ class GachaBot(commands.Bot):
             rarity = self.content.rarity(row["rarity"])
             if rarity is None:
                 continue
+            template = self.content.equipment_template(row["item_key"])
             player.equipped[row["slot"]] = Equipment(
-                db_id=row["id"], key=row["item_key"], name=row["item_key"].replace("_", " ").title(),
+                db_id=row["id"], key=row["item_key"],
+                name=template.name if template else row["item_key"].replace("_", " ").title(),
                 etype=EquipmentType.from_key(row["slot"]) or EquipmentType.WEAPON,
                 rarity=rarity,
                 attack=row["attack"], defense=row["defense"], luck=row["luck"],

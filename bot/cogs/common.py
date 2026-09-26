@@ -27,6 +27,15 @@ class GameMixin(commands.Cog):
         """The guild used for scoping game data (None in DMs)."""
         return ctx.guild.id if ctx.guild else None
 
+    async def player(self, ctx: commands.Context, user: discord.abc.User | None = None) -> Player:
+        """Player aggregate only (1 player query + 1 upgrade query).
+
+        Use for commands that don't consult combat stats — skips the
+        equipment query and stat composition of player_profile().
+        """
+        target = user or ctx.author
+        return await self.bot.economy.ensure_player(self.scope_guild(ctx), target.id)
+
     async def player_profile(
         self, ctx: commands.Context, user: discord.abc.User | None = None
     ) -> tuple[Player, StatProfile]:

@@ -14,7 +14,8 @@ import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Final, Protocol
+from types import MappingProxyType
+from typing import Callable, Final, Mapping, Protocol
 
 from bot.models.items import EquipmentTemplate, GachaCard, HuntEnemy
 
@@ -151,6 +152,21 @@ class ContentRegistry:
         self._upgrades = upgrades
         self._badges = badges
         self._spawn_algorithm = spawn_algorithm
+        self._build_indexes()
+
+    def _build_indexes(self) -> None:
+        """Precompute per-rarity pools so rolls never rescan every item."""
+        self._cards_by_rarity: dict[str, list[GachaCard]] = {}
+        for card in self._cards.values():
+            self._cards_by_rarity.setdefault(card.rarity.key, []).append(card)
+        self._enemies_by_rarity: dict[str, list[HuntEnemy]] = {}
+        for enemy in self._enemies.values():
+            self._enemies_by_rarity.setdefault(enemy.rarity.key, []).append(enemy)
+        # equipment eligibility is tier-based: min_rarity.tier <= rolled tier
+        self._equipment_by_tier: dict[int, list[EquipmentTemplate]] = {
+            tier: [e for e in self._equipment.values() if e.min_rarity.tier <= tier]
+            for tier in {r.tier for r in self._tier_order}
+        }
 
     # -- construction --------------------------------------------------------
 
@@ -262,6 +278,7 @@ class ContentRegistry:
         self._upgrades = other._upgrades
         self._badges = other._badges
         self._spawn_algorithm = other._spawn_algorithm
+        self._build_indexes()
 
     # -- rarity API ----------------------------------------------------------
 
@@ -324,8 +341,8 @@ class ContentRegistry:
     # -- content collections -------------------------------------------------
 
     @property
-    def cards(self) -> dict[str, GachaCard]:
-        return dict(self._cards)
+    def cards(self) -> Mapping[str, GachaCard]:
+        return MappingProxyType(self._cards)
 
     def card(self, key: str) -> GachaCard | None:
         return self._cards.get(key)
@@ -334,11 +351,11 @@ class ContentRegistry:
         return list(self._cards.values())
 
     def cards_by_rarity(self, rarity: RarityTier) -> list[GachaCard]:
-        return [c for c in self._cards.values() if c.rarity.key == rarity.key]
+        return list(self._cards_by_rarity.get(rarity.key, ()))
 
     @property
-    def equipment_templates(self) -> dict[str, EquipmentTemplate]:
-        return dict(self._equipment)
+    def equipment_templates(self) -> Mapping[str, EquipmentTemplate]:
+        return MappingProxyType(self._equipment)
 
     def equipment_template(self, key: str) -> EquipmentTemplate | None:
         return self._equipment.get(key)
@@ -347,11 +364,11 @@ class ContentRegistry:
         return list(self._equipment.values())
 
     def equipment_by_rarity(self, rarity: RarityTier) -> list[EquipmentTemplate]:
-        return [e for e in self._equipment.values() if e.min_rarity.tier <= rarity.tier]
+        return list(self._equipment_by_tier.get(rarity.tier, ()))
 
     @property
-    def enemies(self) -> dict[str, HuntEnemy]:
-        return dict(self._enemies)
+    def enemies(self) -> Mapping[str, HuntEnemy]:
+        return MappingProxyType(self._enemies)
 
     def enemy(self, key: str) -> HuntEnemy | None:
         return self._enemies.get(key)
@@ -360,13 +377,13 @@ class ContentRegistry:
         return list(self._enemies.values())
 
     def enemies_by_rarity(self, rarity: RarityTier) -> list[HuntEnemy]:
-        return [e for e in self._enemies.values() if e.rarity.key == rarity.key]
+        return list(self._enemies_by_rarity.get(rarity.key, ()))
 
     # -- upgrades / badges ---------------------------------------------------
 
     @property
-    def upgrades(self) -> dict[str, UpgradeSpec]:
-        return dict(self._upgrades)
+    def upgrades(self) -> Mapping[str, UpgradeSpec]:
+        return MappingProxyType(self._upgrades)
 
     def upgrade(self, key: str) -> UpgradeSpec | None:
         return self._upgrades.get(key)
@@ -378,8 +395,8 @@ class ContentRegistry:
         return {u.key: u.effect_per_level for u in self._upgrades.values()}
 
     @property
-    def badges(self) -> dict[str, BadgeSpec]:
-        return dict(self._badges)
+    def badges(self) -> Mapping[str, BadgeSpec]:
+        return MappingProxyType(self._badges)
 
     def badge(self, key: str) -> BadgeSpec | None:
         return self._badges.get(key)

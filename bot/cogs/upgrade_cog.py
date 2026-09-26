@@ -17,7 +17,7 @@ class UpgradeCog(GameMixin):
 
     @commands.hybrid_group(name="upgrades", aliases=["upg", "perks"], invoke_without_command=True)
     async def upgrades(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         lines = []
         for spec in self.bot.content.all_upgrades():
             level = player.upgrades.get(spec.key, 0)
@@ -33,7 +33,7 @@ class UpgradeCog(GameMixin):
 
     @upgrades.command(name="buy", description="Buy one level of an upgrade.")
     async def buy(self, ctx: commands.Context, *, name: str) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         key = name.strip().lower()
         spec = next(
             (s for s in self.bot.content.all_upgrades() if key in (s.key, s.name.lower())), None

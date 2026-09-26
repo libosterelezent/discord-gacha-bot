@@ -17,7 +17,7 @@ class HuntBotCog(GameMixin):
 
     @commands.hybrid_group(name="huntbot", aliases=["hb"], invoke_without_command=True)
     async def huntbot(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         state = await self.bot.huntbot.get_state(player.guild_id, ctx.author.id)
         if state is None:
             await ctx.reply(
@@ -29,7 +29,7 @@ class HuntBotCog(GameMixin):
 
     @huntbot.command(name="buy", description="Purchase your personal huntbot.")
     async def buy(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         cost = await self.bot.huntbot.buy(self.scope_guild(ctx), player)
         await ctx.reply(
             embed=Theme.embed(
@@ -46,7 +46,7 @@ class HuntBotCog(GameMixin):
 
     @huntbot.command(name="upgrade", description="Increase huntbot level (+income).")
     async def upgrade(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         new_level, cost = await self.bot.huntbot.upgrade(self.scope_guild(ctx), player)
         income = self.bot.huntbot.income_per_tick(new_level)
         await ctx.reply(
@@ -60,7 +60,7 @@ class HuntBotCog(GameMixin):
 
     @huntbot.command(name="toggle", description="Start or stop your huntbot.")
     async def toggle(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         state = await self.bot.huntbot.require_state(player.guild_id, player.user_id)
         await self.bot.huntbot.set_active(self.scope_guild(ctx), player, not state.active)
         if not state.active:
@@ -70,7 +70,7 @@ class HuntBotCog(GameMixin):
 
     @huntbot.command(name="collect", aliases=["claim"], description="Collect banked huntbot rewards.")
     async def collect(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         harvest_spec = self.bot.content.upgrade("harvest")
         harvest = player.upgrades.get("harvest", 0) * (harvest_spec.effect_per_level if harvest_spec else 0.0)
         coins, items = await self.bot.huntbot.collect(self.scope_guild(ctx), player, harvest_bonus=harvest)
@@ -82,7 +82,7 @@ class HuntBotCog(GameMixin):
 
     @huntbot.command(name="info", description="Huntbot status & statistics.")
     async def info(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         state = await self.bot.huntbot.require_state(player.guild_id, ctx.author.id)
         next_price = self.bot.huntbot.price(state.level)
         income = self.bot.huntbot.income_per_tick(state.level)
