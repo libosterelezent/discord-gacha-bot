@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Sequence
 
+import discord
 from discord import ui
 
 from bot.ui.theme import Theme
@@ -27,6 +28,36 @@ if TYPE_CHECKING:
 def plain(text: str) -> str:
     """Marker for call sites intentionally using a plain text reply."""
     return text
+
+
+class SharePullButton(ui.Button):
+    """Reposts a pull highlight into the channel for everyone to see."""
+
+    def __init__(self, highlight: str, colour: int, custom_note: str = "") -> None:
+        super().__init__(
+            label="Share", emoji="\U0001f4e4",
+            style=discord.ButtonStyle.secondary, row=0,
+        )
+        self._highlight = highlight
+        self._colour = colour
+        self._note = custom_note
+        self._shared = False
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if self._shared:
+            await interaction.response.send_message(
+                "Already shared — spread the luck around.", ephemeral=True
+            )
+            return
+        self._shared = True
+        embed = Theme.embed(description=self._highlight, colour=self._colour)
+        if self._note:
+            embed.set_footer(text=self._note)
+        await interaction.response.send_message(embed=embed)
+        try:
+            self.disabled = True
+        except Exception:  # pragma: no cover - view already detached
+            pass
 
 
 def base_container(accent: int | None = None) -> tuple[ui.LayoutView, ui.Container]:
@@ -116,7 +147,7 @@ def profile_view(
     )
 
 
-def pull_view(session: "PullSession", shard_emoji: str, pity_limit: int) -> ui.LayoutView:
+def pull_view(session: "PullSession", shard_emoji: str, pity_limit: int, puller: str | None = None) -> ui.LayoutView:
     outcomes = [o.describe() for o in session.outcomes]
     pity_note = " \U0001f6a8 **PITY!**" if any(o.pity_triggered for o in session.outcomes) else ""
     header = f"## \U0001f3a3 Pull Results x{len(session.outcomes)}{pity_note}"
@@ -124,7 +155,25 @@ def pull_view(session: "PullSession", shard_emoji: str, pity_limit: int) -> ui.L
     footer = (
         f"New {session.new_cards} \u00b7 +{session.shards_gained}{shard_emoji} \u00b7 best: {session.best.label}"
     )
-    return card_view(header, body, accent=session.best.colour, footer=footer)
+    view, container = base_container(session.best.colour if session.best else Theme.primary)
+    _header(container, header)
+    container.add_item(ui.Separator())
+    container.add_item(ui.TextDisplay(body))
+    container.add_item(ui.Separator())
+    container.add_item(ui.TextDisplay(f"-# {footer}"))
+    # share button for notable pulls (epic+): spreads the pull into the channel
+    if session.best is not None and session.best.tier >= 4:
+        best_outcome = max(session.outcomes, key=lambda o: o.rarity.tier)
+        container.add_item(
+            ui.ActionRow(
+                SharePullButton(
+                    highlight=best_outcome.describe(),
+                    colour=best_outcome.rarity.colour,
+                    custom_note=f"pulled by {puller}" if puller else Theme.footer(),
+                )
+            )
+        )
+    return view
 
 
 def hunt_view(
