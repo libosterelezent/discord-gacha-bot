@@ -26,7 +26,11 @@ class HuntCog(GameMixin):
         # extra lines that don't fit the compact card
         extras: list[str] = []
         for item in result.drops:
-            extras.append(f"\U0001f081 Loot drop: {item}")
+            pct = self.bot.content.equipment_roll_percentile(item)
+            flair = f" \U0001f525 **GOD ROLL ({pct * 100:.0f}%)**" if pct is not None and pct >= 0.99 else ""
+            extras.append(f"\U0001f081 Loot drop: {item}{flair}")
+            if pct is not None and pct >= 0.99:
+                await self.bot.badges.grant(self.scope_guild(ctx), ctx.author.id, "god_roller")
         if result.card_key:
             card = self.bot.content.card(result.card_key)
             if card:

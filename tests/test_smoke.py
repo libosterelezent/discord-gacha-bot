@@ -84,6 +84,43 @@ class RegistryTest(unittest.TestCase):
         picks = {self.registry.modifier_for_date(date(2026, 9, d)).key for d in range(20, 27)}
         self.assertGreater(len(picks), 1)
 
+    def test_equipment_roll_percentile_math(self) -> None:
+        import random
+
+        template = self.registry.equipment_template("war_scythe")
+        rarity = self.registry.rarity("rare")
+        low = template.roll(random.Random(0), rarity)
+        low.attack = round(template.base_attack * rarity.stat_multiplier * 0.85)
+        low.defense = 0
+        low.luck = 0
+        self.assertAlmostEqual(self.registry.equipment_roll_percentile(low), 0.0, places=1)
+
+        high = template.roll(random.Random(0), rarity)
+        high.attack = round(template.base_attack * rarity.stat_multiplier * 1.15)
+        high.defense = 0
+        high.luck = 0
+        self.assertAlmostEqual(self.registry.equipment_roll_percentile(high), 1.0, places=1)
+
+        mid = template.roll(random.Random(0), rarity)
+        mid.attack = round(template.base_attack * rarity.stat_multiplier * 1.0)
+        mid.defense = 0
+        mid.luck = 0
+        self.assertAlmostEqual(self.registry.equipment_roll_percentile(mid), 0.5, delta=0.02)
+
+        # forging must not change the percentile
+        forged = template.roll(random.Random(0), rarity)
+        forged.attack = round(template.base_attack * rarity.stat_multiplier * 1.0)
+        forged.defense = 0
+        forged.luck = 0
+        forged.level = 5
+        from bot.config import SETTINGS
+
+        factor = (1 + SETTINGS.equipment.forge_growth) ** 5
+        forged.attack = round(forged.attack * factor)
+        self.assertAlmostEqual(
+            self.registry.equipment_roll_percentile(forged), 0.5, delta=0.03
+        )
+
     def test_stat_profile_applies_set_bonuses(self) -> None:
         from bot.models.player import Player, StatProfile
 

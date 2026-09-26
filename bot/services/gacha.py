@@ -43,6 +43,7 @@ class PullOutcome:
     is_new_card: bool = False
     shards_awarded: int = 0
     pity_triggered: bool = False
+    roll_pct: float | None = None     # equipment stat-roll percentile
 
     @property
     def kind(self) -> str:
@@ -54,7 +55,12 @@ class PullOutcome:
             tag = "NEW!" if self.is_new_card else f"+{self.shards_awarded}{shard_emoji}"
             return f"{self.rarity.emoji} **{self.card.name}** ({self.rarity.stars}) {tag}"
         assert self.equipment is not None
-        return f"{self.rarity.emoji} **{self.equipment.name}** ({self.rarity.stars})"
+        roll = ""
+        if self.roll_pct is not None and self.roll_pct >= 0.95:
+            roll = f" \U0001f525 **GOD ROLL** ({self.roll_pct * 100:.0f}%)"
+        elif self.roll_pct is not None and self.roll_pct >= 0.9:
+            roll = f" ({self.roll_pct * 100:.0f}% roll)"
+        return f"{self.rarity.emoji} **{self.equipment.name}** ({self.rarity.stars}){roll}"
 
 
 @dataclass(slots=True)
@@ -151,7 +157,10 @@ class GachaService(BaseService):
             return PullOutcome(rarity=rarity, card=card, is_new_card=card.key not in owned_cards)
         template = self._rng.choice(templates)
         equipment = template.roll(self._rng, rarity)
-        return PullOutcome(rarity=rarity, equipment=equipment)
+        return PullOutcome(
+            rarity=rarity, equipment=equipment,
+            roll_pct=self.content.equipment_roll_percentile(equipment),
+        )
 
     # -- public API ------------------------------------------------------------
 

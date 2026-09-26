@@ -18,8 +18,21 @@ def _fmt_piece(content, p: dict[str, Any]) -> str:
     name = template.name if template else p["item_key"].replace("_", " ").title()
     plus = f"+{p['level']}" if p["level"] else ""
     mark = "\U0001f4ce" if p["equipped"] else "\u2022"
+    roll = ""
+    if template and rarity:
+        from bot.models.items import Equipment, EquipmentType
+
+        item = Equipment(
+            key=p["item_key"], name=name, etype=EquipmentType.from_key(p["slot"]) or EquipmentType.WEAPON,
+            rarity=rarity, attack=p["attack"], defense=p["defense"], luck=p["luck"], level=p["level"],
+        )
+        pct = content.equipment_roll_percentile(item)
+        if pct is not None and pct >= 0.95:
+            roll = f" \U0001f525**{pct * 100:.0f}%**"
+        elif pct is not None and pct >= 0.9:
+            roll = f" ({pct * 100:.0f}%)"
     return (
-        f"{mark} `#{p['id']}` {emoji} **{name}{plus}** "
+        f"{mark} `#{p['id']}` {emoji} **{name}{plus}**{roll} "
         f"\u2694{p['attack']} \U0001f6e1{p['defense']} \U0001f380{p['luck']}"
     )
 

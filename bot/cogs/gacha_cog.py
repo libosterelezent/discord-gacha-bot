@@ -28,6 +28,9 @@ class GachaCog(GameMixin):
             return
         player = await self.player(ctx)
         session = await self.bot.gacha.pull(self.scope_guild(ctx), player, count)
+        for outcome in session.outcomes:
+            if outcome.roll_pct is not None and outcome.roll_pct >= 0.99:
+                await self.bot.badges.grant(self.scope_guild(ctx), ctx.author.id, "god_roller")
         await ctx.reply(
             view=ui.pull_view(session, SETTINGS.shards.emoji, SETTINGS.gacha.pity_limit),
             mention_author=False,

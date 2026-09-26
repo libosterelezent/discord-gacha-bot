@@ -487,6 +487,31 @@ class ContentRegistry:
 
     # -- card sets -----------------------------------------------------------
 
+    def equipment_roll_percentile(self, item) -> float | None:
+        """Stat-roll quality of an equipment instance (0.0–1.0).
+
+        Equipment rolls land in [85%, 115%] of template×rarity; this
+        recovers where in that band the item's primary stat rolled,
+        invariant under forging (the growth factor is divided out).
+        """
+        template = self._equipment.get(item.key)
+        if template is None:
+            return None
+        from bot.config import SETTINGS
+
+        growth = (1 + SETTINGS.equipment.forge_growth) ** item.level
+        mult = item.rarity.stat_multiplier
+        pairs = sorted(
+            ((template.base_attack, item.attack), (template.base_defense, item.defense),
+             (template.base_luck, item.luck)),
+            key=lambda p: p[0], reverse=True,
+        )
+        for base, stat in pairs:
+            if base > 0:
+                spread = stat / (base * mult * growth)
+                return min(1.0, max(0.0, (spread - 0.85) / 0.3))
+        return None
+
     @property
     def sets(self) -> Mapping[str, CardSet]:
         return MappingProxyType(self._sets)
