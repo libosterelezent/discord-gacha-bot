@@ -18,7 +18,7 @@ class EconomyCog(GameMixin):
 
     @commands.hybrid_command(name="balance", aliases=["bal", "wallet"], description="Check your coin balance.")
     async def balance(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         await ctx.reply(
             ui.plain(
                 f"{SETTINGS.currency.emoji} **{ctx.author.display_name}** — "
@@ -30,7 +30,7 @@ class EconomyCog(GameMixin):
 
     @commands.hybrid_command(name="daily", description="Claim your daily reward (resets every 24h).")
     async def daily(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         reward = await self.bot.economy.daily(self.scope_guild(ctx), player)
         await ctx.reply(
             embed=Theme.embed(
@@ -43,7 +43,7 @@ class EconomyCog(GameMixin):
 
     @commands.hybrid_command(name="work", description="Work for coins (hourly).")
     async def work(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         earned = await self.bot.economy.work(self.scope_guild(ctx), player)
         await ctx.reply(
             ui.plain(f"\U0001f4bc You worked a shift and earned {SETTINGS.money(earned)}."),
@@ -53,7 +53,7 @@ class EconomyCog(GameMixin):
     @commands.hybrid_command(name="pay", aliases=["give"], description="Send coins to another player.")
     @commands.guild_only()
     async def pay(self, ctx: commands.Context, member: discord.Member, amount: commands.Range[int, 1]) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         new_balance = await self.bot.economy.transfer(self.scope_guild(ctx), player, member.id, amount)
         await ctx.reply(
             ui.plain(
@@ -65,7 +65,7 @@ class EconomyCog(GameMixin):
 
     @commands.hybrid_command(name="gamble", description="50/50 double or nothing.")
     async def gamble(self, ctx: commands.Context, amount: commands.Range[int, 1]) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         delta = await self.bot.economy.gamble(self.scope_guild(ctx), player, amount)
         if delta > 0:
             await ctx.reply(

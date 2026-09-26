@@ -5,13 +5,13 @@ Equipment upgrade cost scales with rarity tier and target level:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
 
 from bot.core.events import GameEvent
 from bot.core.exceptions import EquipmentError, InsufficientFundsError, ItemNotFoundError, NotEnoughItemsError
+from bot.core.util import SQL_ADD_BALANCE, SQL_INSERT_ECO_LOG, SQL_SUBTRACT_BALANCE_GUARDED, now_iso
 from bot.models.player import Player
 from bot.services.base import BaseService
 
@@ -20,21 +20,12 @@ SLOT_KEYS: tuple[str, ...] = ("weapon", "armor", "amulet")
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now_iso()
 
 
-_SQL_SPEND = text(
-    "UPDATE players SET balance = balance - :c, updated_at = :t WHERE guild_id = :g AND user_id = :u"
-)
-_SQL_GAIN = text(
-    "UPDATE players SET balance = balance + :c, updated_at = :t WHERE guild_id = :g AND user_id = :u"
-)
-_SQL_ECO_LOG = text(
-    """
-    INSERT INTO economy_log (guild_id, user_id, delta, reason, balance_after, created_at)
-    VALUES (:g, :u, :d, :r, :b, :t)
-    """
-)
+_SQL_SPEND = SQL_SUBTRACT_BALANCE_GUARDED
+_SQL_GAIN = SQL_ADD_BALANCE
+_SQL_ECO_LOG = SQL_INSERT_ECO_LOG
 
 
 class EquipmentService(BaseService):
@@ -127,7 +118,9 @@ class EquipmentService(BaseService):
         new_luk = round(piece["luck"] * growth)
         now = _now_iso()
         async with self.db.transaction() as conn:
-            await conn.execute(_SQL_SPEND, {"c": cost, "t": now, "g": player.guild_id, "u": player.user_id})
+            spend = await conn.execute(_SQL_SPEND, {"d": cost, "t": now, "g": player.guild_id, "u": player.user_id})
+            if spend.rowcount == 0:  # concurrent spend won the funds
+                raise InsufficientFundsError(cost, player.balance)
             await conn.execute(
                 text("UPDATE equipment SET level = level + 1, attack = :a, defense = :d, luck = :l WHERE id = :id"),
                 {"a": new_atk, "d": new_dfn, "l": new_luk, "id": piece["id"]},
@@ -158,7 +151,7 @@ class EquipmentService(BaseService):
             await conn.execute(
                 text("DELETE FROM equipment WHERE id = :id"), {"id": piece["id"]}
             )
-            await conn.execute(_SQL_GAIN, {"c": value, "t": now, "g": player.guild_id, "u": player.user_id})
+            await conn.execute(_SQL_GAIN, {"d": value, "t": now, "g": player.guild_id, "u": player.user_id})
             await conn.execute(
                 _SQL_ECO_LOG,
                 {"g": player.guild_id, "u": player.user_id, "d": value, "r": f"equip_sell:{piece['id']}", "b": player.balance + value, "t": now},

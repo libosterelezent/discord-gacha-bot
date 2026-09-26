@@ -16,10 +16,8 @@ from bot.ui.theme import Theme
 
 
 def is_owner() -> commands.check:
-    async def predicate(ctx: commands.Context) -> bool:
-        app = await ctx.bot.application_info()
-        return ctx.author.id == app.owner.id
-    return commands.check(predicate)
+    """Cached owner check (discord.py caches application_info after first call)."""
+    return commands.is_owner()
 
 
 _START_TIME = time.time()
@@ -35,6 +33,7 @@ class AdminCog(GameMixin):
     @is_owner()
     @commands.guild_only()
     async def grant(self, ctx: commands.Context, member: discord.Member, amount: commands.Range[int, 1]) -> None:
+        await self.bot.economy.ensure_player(ctx.guild.id, member.id)
         new_balance = await self.bot.economy.deposit(
             ctx.guild.id, member.id, amount, reason=f"grant:{ctx.author.id}"
         )
@@ -136,6 +135,76 @@ class AdminCog(GameMixin):
     async def reload_settings(self, ctx: commands.Context) -> None:
         self.bot.reload_settings()
         await ctx.reply(embed=Theme.embed("\u267b\ufe0f Settings Reloaded", "game.json values are live.", Theme.success), mention_author=False)
+
+    @commands.hybrid_command(name="reload_content", description="[OWNER] Reload content JSON files without restart.")
+    @is_owner()
+    async def reload_content(self, ctx: commands.Context) -> None:
+        try:
+            self.bot.reload_content()
+        except Exception as exc:
+            await ctx.reply(
+                embed=Theme.error_embed(f"Reload aborted, previous content still active:\n`{exc}`"),
+                mention_author=False,
+            )
+            return
+        await ctx.reply(
+            embed=Theme.embed("\u267b\ufe0f Content Reloaded", "Cards, equipment, enemies, upgrades and badges are live.", Theme.success),
+            mention_author=False,
+        )
+
+    # -- player data management --------------------------------------------------
+
+    @commands.hybrid_group(name="player", invoke_without_command=True, description="[OWNER] Inspect a player's stored data.")
+    @is_owner()
+    @commands.guild_only()
+    async def player(self, ctx: commands.Context, member: discord.Member) -> None:
+        row = await self.bot.economy.player_row(ctx.guild.id, member.id)
+        if row is None:
+            await ctx.reply(embed=Theme.error_embed(f"{member.display_name} has no player row yet."), mention_author=False)
+            return
+        row.pop("created_at", None)
+        row.pop("updated_at", None)
+        lines = [f"`{key}`: **{value:,}**" if isinstance(value, int) else f"`{key}`: {value}"
+                 for key, value in row.items()]
+        upgrades = await self.bot.upgrades.levels_for(row["guild_id"], member.id)
+        if upgrades:
+            lines.append("upgrades: " + ", ".join(f"{k} lv{v}" for k, v in sorted(upgrades.items())))
+        await ctx.reply(
+            embed=Theme.embed(f"\U0001f9fe Player data — {member.display_name}", "\n".join(lines)),
+            mention_author=False,
+        )
+
+    @player.command(name="setcoins", description="[OWNER] Overwrite a player's coin balance.")
+    @is_owner()
+    @commands.guild_only()
+    async def player_setcoins(self, ctx: commands.Context, member: discord.Member, amount: commands.Range[int, 0]) -> None:
+        new_balance = await self.bot.economy.set_balance(
+            ctx.guild.id, member.id, amount, reason=f"admin:{ctx.author.id}"
+        )
+        await ctx.reply(
+            embed=Theme.embed("\U0001fa99 Balance Updated", f"{member.mention} now has {SETTINGS.money(new_balance)}.", Theme.success),
+            mention_author=False,
+        )
+
+    @player.command(name="setlevel", description="[OWNER] Overwrite a player's level.")
+    @is_owner()
+    @commands.guild_only()
+    async def player_setlevel(self, ctx: commands.Context, member: discord.Member, level: commands.Range[int, 1]) -> None:
+        await self.bot.economy.set_level(ctx.guild.id, member.id, level)
+        await ctx.reply(
+            embed=Theme.embed("\U0001f53c Level Updated", f"{member.mention} is now level **{level}**.", Theme.success),
+            mention_author=False,
+        )
+
+    @player.command(name="setshards", description="[OWNER] Overwrite a player's shard balance.")
+    @is_owner()
+    @commands.guild_only()
+    async def player_setshards(self, ctx: commands.Context, member: discord.Member, amount: commands.Range[int, 0]) -> None:
+        await self.bot.economy.set_shards(ctx.guild.id, member.id, amount)
+        await ctx.reply(
+            embed=Theme.embed("\u2728 Shards Updated", f"{member.mention} now has **{amount:,}** shards.", Theme.success),
+            mention_author=False,
+        )
 
     @commands.hybrid_command(name="botstats", description="[OWNER] Runtime & database statistics.")
     @is_owner()

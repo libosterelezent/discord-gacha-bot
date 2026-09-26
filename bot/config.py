@@ -170,12 +170,12 @@ _DEFAULT_GAME_JSON: Final[str] = json.dumps(
         },
         "currency": {"name": "Coins", "emoji": "\U0001fa99"},
         "shards": {"name": "Shards", "emoji": "\u2728"},
-        "xp": {"per_hunt_min": 10, "per_hunt_max": 40, "curve_base": 1.35},
+        "xp": {"curve_base": 1.35},
         "cooldowns": {
             "fixed": {"daily": 86400, "work": 3600, "hunt": 45},
             "windows": {"pull": {"max_calls": 3, "window": 10}},
         },
-        "spawn": {"algorithm": "weighted_luck", "luck_tilt_exponent": 1.0},
+        "spawn": {"algorithm": "weighted_luck"},
         "gacha": {
             "pull_cost": 100,
             "multi_cost": 900,

@@ -5,28 +5,29 @@ Badges are declared in ``bot/content/data/badges.json`` with a scope:
 * ``guild``  — awarded per server (e.g. event-winner badges) and stored
   against that guild only;
 * ``global`` — follows the player across every server (e.g. veteran or
-  maintainer-recognised titles).
-
-This is the foundation for future global achievements/ranks without
-any schema changes: rows with a NULL ``guild_id`` are global awards.
+  maintainer-recognised titles). Global rows use the sentinel guild_id
+  ``0`` (same convention as the global economy scope): NULLs never
+  participate in unique constraints, so ON CONFLICT deduplication would
+  silently fail for NULL-scoped rows.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 
 from bot.core.events import GameEvent
 from bot.core.exceptions import GachaBotError
+from bot.core.util import clip, now_iso
 from bot.services.base import BaseService
+from bot.services.economy import GLOBAL_GUILD_ID
 
 if TYPE_CHECKING:
     from bot.content.registry import BadgeSpec
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now_iso()
 
 
 _SQL_GRANT = text(
@@ -50,8 +51,8 @@ class BadgeService(BaseService):
         """Award a badge. Guild badges bind to `guild_id`; global ones to NULL."""
         spec = self.content.badge(badge_key)
         if spec is None:
-            raise GachaBotError(f"Unknown badge `{badge_key}`.")
-        storage_guild = guild_id if spec.scope == "guild" else None
+            raise GachaBotError(f"Unknown badge `{clip(badge_key)}`.")
+        storage_guild = guild_id if spec.scope == "guild" else GLOBAL_GUILD_ID
         await self.db.execute(
             _SQL_GRANT,
             {"u": user_id, "k": badge_key, "g": storage_guild, "t": _now_iso(), "by": granted_by},
@@ -67,13 +68,12 @@ class BadgeService(BaseService):
     async def revoke(self, guild_id: int | None, user_id: int, badge_key: str) -> "BadgeSpec":
         spec = self.content.badge(badge_key)
         if spec is None:
-            raise GachaBotError(f"Unknown badge `{badge_key}`.")
-        storage_guild = guild_id if spec.scope == "guild" else None
+            raise GachaBotError(f"Unknown badge `{clip(badge_key)}`.")
+        storage_guild = guild_id if spec.scope == "guild" else GLOBAL_GUILD_ID
         await self.db.execute(
             """
             DELETE FROM badges
-            WHERE user_id = :u AND badge_key = :k
-              AND ((:g IS NULL AND guild_id IS NULL) OR guild_id = :g)
+            WHERE user_id = :u AND badge_key = :k AND guild_id = :g
             """,
             {"u": user_id, "k": badge_key, "g": storage_guild},
         )
@@ -88,20 +88,21 @@ class BadgeService(BaseService):
     async def player_badges(self, user_id: int, guild_id: int | None = None) -> list[tuple["BadgeSpec", int | None]]:
         """All badges a player holds: global + (optionally) guild-specific.
 
-        Returns (spec, holder_guild_id) pairs.
+        Returns (spec, holder_guild_id) pairs; global rows report ``None``.
         """
         rows = await self.db.fetch_all(
             """
             SELECT badge_key, guild_id FROM badges
-            WHERE user_id = :u AND (guild_id IS NULL OR guild_id = :g)
+            WHERE user_id = :u AND (guild_id = :global OR guild_id = :g)
             """,
-            {"u": user_id, "g": guild_id},
+            {"u": user_id, "global": GLOBAL_GUILD_ID, "g": guild_id if guild_id is not None else GLOBAL_GUILD_ID},
         )
         result: list[tuple[BadgeSpec, int | None]] = []
         for row in rows:
             spec = self.content.badge(row["badge_key"])
             if spec is not None:
-                result.append((spec, row["guild_id"]))
+                holder = row["guild_id"] if row["guild_id"] != GLOBAL_GUILD_ID else None
+                result.append((spec, holder))
         return result
 
     async def badge_strings(self, user_id: int, guild_id: int | None = None) -> list[str]:

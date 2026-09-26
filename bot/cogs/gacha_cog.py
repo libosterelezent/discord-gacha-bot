@@ -26,7 +26,7 @@ class GachaCog(GameMixin):
                 mention_author=False,
             )
             return
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         session = await self.bot.gacha.pull(self.scope_guild(ctx), player, count)
         await ctx.reply(
             view=ui.pull_view(session, SETTINGS.shards.emoji, SETTINGS.gacha.pity_limit),
@@ -36,7 +36,7 @@ class GachaCog(GameMixin):
     @commands.hybrid_command(name="collection", aliases=["coll", "dex"], description="View your card collection.")
     async def collection(self, ctx: commands.Context, member: discord.Member | None = None) -> None:
         target = member or ctx.author
-        player, _ = await self.bot.player_profile(self.scope_guild(ctx), target.id)
+        player = await self.player(ctx, target)
         owned, total = await self.bot.gacha.collection_progress(player.guild_id, target.id)
         cards = await self.bot.gacha.collection(player.guild_id, target.id)
         lines = [f"{c.rarity.emoji} **{c.name}** {c.rarity.stars} x{qty}" for c, qty in cards[:25]]
@@ -47,7 +47,7 @@ class GachaCog(GameMixin):
 
     @commands.hybrid_command(name="sell_dupes", description="Convert duplicate cards into coins.")
     async def sell_dupes(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         gained = await self.bot.gacha.sell_duplicates(self.scope_guild(ctx), player)
         if gained == 0:
             await ctx.reply(embed=Theme.error_embed("No duplicate cards to sell."), mention_author=False)
@@ -59,7 +59,7 @@ class GachaCog(GameMixin):
 
     @commands.hybrid_group(name="shards", invoke_without_command=True, description="Shard currency info.")
     async def shards(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         pull_cost = int(SETTINGS.gacha.pull_cost / SETTINGS.gacha.shard_pull_divisor)
         explanation = (
             f"Shards come from duplicate pulls.\n"
@@ -69,7 +69,7 @@ class GachaCog(GameMixin):
 
     @shards.command(name="pull", description="Spend shards on a pull.")
     async def shards_pull(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         session = await self.bot.gacha.pull(self.scope_guild(ctx), player, 1, use_shards=True)
         await ctx.reply(
             view=ui.pull_view(session, SETTINGS.shards.emoji, SETTINGS.gacha.pity_limit),

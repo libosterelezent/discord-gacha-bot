@@ -16,8 +16,6 @@
         "emoji": "\u2728"
     },
     "xp": {
-        "per_hunt_min": 10,
-        "per_hunt_max": 40,
         "curve_base": 1.35
     },
     "cooldowns": {
@@ -31,8 +29,7 @@
         }
     },
     "spawn": {
-        "algorithm": "weighted_luck",
-        "luck_tilt_exponent": 1.0
+        "algorithm": "weighted_luck"
     },
     "gacha": {
         "pull_cost": 100,

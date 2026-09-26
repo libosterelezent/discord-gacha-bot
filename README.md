@@ -36,7 +36,9 @@ pluggable algorithm selected in `config/game.json`
 
 Every cooldown, cost curve, pity parameter, drop rate and currency
 name is maintainer-editable there, and **hot-reloadable** with the
-`reload_settings` command — no restart, no code changes.
+`reload_settings` command — no restart, no code changes. Game content
+(`bot/content/data/*.json`) is hot-reloadable too via `reload_content`;
+a broken file aborts the reload without touching live state.
 
 ### Guild vs global scope
 
@@ -52,11 +54,14 @@ schema supports both modes natively.
 * discord.py tracks Discord's per-route rate-limit buckets from the
   `X-RateLimit-*` headers and pre-emptively waits — the bot never
   hammers an endpoint into a 429.
-* The event-logging sink sends through a semaphore-capped queue with
-  explicit `RetryAfter` back-off and jitter; failed channel sends are
-  dropped-and-logged so logging can never stall gameplay.
+* The event-logging sink delivers through a bounded background queue
+  (fire-and-forget, so gameplay never awaits Discord HTTP) with
+  bounded, jittered retries for 429s that still surface; failed
+  channel sends are dropped-and-logged.
 * All gameplay cooldowns (daily/work/hunt fixed timers, pull sliding
-  window) live in `config/game.json` and are scope-aware.
+  window) live in `config/game.json` and are scope-aware. Fixed
+  cooldowns are **persisted in the database** — they survive restarts
+  and redeploys instead of resetting.
 
 ---
 
@@ -127,6 +132,11 @@ prefix is configurable by the maintainer.
 | `logchannel remove <category>` | Stop logging a category |
 | `logchannel list` | Show configured logging channels |
 | `reload_settings` | Hot-reload `config/game.json` |
+| `reload_content` | Hot-reload `bot/content/data/*.json` (aborts safely on broken JSON) |
+| `player <@user>` | Inspect a player's stored data (row + upgrade levels) |
+| `player setcoins <@user> <amount>` | Overwrite a player's balance (audit-logged) |
+| `player setlevel <@user> <level>` | Overwrite a player's level |
+| `player setshards <@user> <amount>` | Overwrite a player's shards |
 | `botstats` | Players, pulls, circulation, uptime, versions |
 
 **Log categories:** `economy`, `gacha`, `hunt`, `huntbot`,
@@ -183,8 +193,33 @@ python main.py
 ```
 
 Logs are written to `logs/gacha-bot.log` (rotating, 2 MB × 5 backups).
-The database schema is created automatically on first run — no
+The database schema is created automatically on first run and
+**migrated automatically on upgrade** (e.g. v2 → v3) — no manual
 migration steps needed.
+
+---
+
+## 🧪 Testing & simulation
+
+Three layers, all runnable headless — **no Discord token or network
+required**:
+
+```bash
+python -m unittest discover -s tests   # 23 unit / smoke / UI tests
+python tools/simulate_run.py           # 52-assertion functional battery
+python tools/abuse_run.py              # 63-assertion adversarial battery
+```
+
+The simulators replace Discord's HTTP layer with a recorder and
+fabricate a guild/channel/member world, driving the *real* command
+pipeline: prefix parsing, converters, checks, cooldowns, error
+handlers, slash dispatch through the actual CommandTree, component
+interactions through the actual view store, presence, `tree.sync`,
+sink delivery, 429 fault injection and restart-persistence checks.
+The adversarial battery covers careless input (zero/negative/float/
+huge amounts, wrong types, aliases, DMs) and hostile races (concurrent
+double-claims, cross-path cooldown bypass, IDOR, oversized payloads,
+corrupted content reloads).
 
 ---
 
@@ -214,21 +249,24 @@ bot/
 │   ├── database.py         SQLAlchemy async facade, guild-scoped schema, migrations
 │   ├── gacha_bot.py        Bot subclass: service graph, event bus, error handlers
 │   ├── events.py           domain event bus (pub/sub with isolation)
-│   ├── cooldowns.py        maintainer-configurable, scope-aware cooldowns
-│   ├── ratelimit.py        RetryAfter-aware outbound limiter
+│   ├── cooldowns.py        persistent, scope-aware cooldowns (survive restarts)
+│   ├── ratelimit.py        429-aware outbound limiter (bounded retries + jitter)
+│   ├── util.py             shared SQL fragments, timestamps, text clipping
 │   ├── logging_setup.py    rotating file + console logging
-│   ├── decorators.py       timing, error translation, safe-run helpers
+│   ├── decorators.py       coroutine timing helper
 │   └── exceptions.py       domain exception hierarchy
 ├── models/                 player, stats, items (rarity = content data)
 ├── services/               game logic: economy, gacha, hunt, huntbot,
 │                           equipment, upgrades, badges
 ├── ui/                     theme (colours/footers), Components V2 builders,
 │                           interactive help (dropdown + buttons)
-├── observability/          Discord channel logging sink
+├── observability/          Discord channel logging sink (queued delivery)
 └── cogs/                   thin Discord adapters (hybrid commands)
+tests/                      headless unit / smoke / Components V2 tests
+tools/                      local Discord simulators (functional + adversarial)
 ```
 
-Currently in developement and there is not much functionality.
+Currently in development and there is not much functionality.
 ## 📄 License
 
 MIT — do whatever you want, attribution appreciated.

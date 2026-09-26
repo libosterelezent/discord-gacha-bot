@@ -14,10 +14,12 @@ from bot.ui.theme import Theme
 def _fmt_piece(content, p: dict[str, Any]) -> str:
     rarity = content.rarity(p["rarity"])
     emoji = rarity.emoji if rarity else "\u26ab"
+    template = content.equipment_template(p["item_key"])
+    name = template.name if template else p["item_key"].replace("_", " ").title()
     plus = f"+{p['level']}" if p["level"] else ""
     mark = "\U0001f4ce" if p["equipped"] else "\u2022"
     return (
-        f"{mark} `#{p['id']}` {emoji} **{p['item_key'].replace('_', ' ').title()}{plus}** "
+        f"{mark} `#{p['id']}` {emoji} **{name}{plus}** "
         f"\u2694{p['attack']} \U0001f6e1{p['defense']} \U0001f380{p['luck']}"
     )
 
@@ -30,7 +32,7 @@ class EquipmentCog(GameMixin):
 
     @commands.hybrid_command(name="equipment", aliases=["gear", "inv"], description="List your equipment.")
     async def equipment(self, ctx: commands.Context) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         pieces = await self.bot.equipment.owned(player.guild_id, ctx.author.id)
         if not pieces:
             await ctx.reply(
@@ -46,19 +48,19 @@ class EquipmentCog(GameMixin):
 
     @commands.hybrid_command(name="equip", description="Equip a piece of equipment by ID.")
     async def equip(self, ctx: commands.Context, item_id: commands.Range[int, 1]) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         piece = await self.bot.equipment.equip(self.scope_guild(ctx), player, item_id)
         await ctx.reply(ui.plain(f"\U0001f4ce Equipped {_fmt_piece(self.bot.content, piece)}"), mention_author=False)
 
     @commands.hybrid_command(name="unequip", description="Unequip a piece by ID.")
     async def unequip(self, ctx: commands.Context, item_id: commands.Range[int, 1]) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         piece = await self.bot.equipment.unequip(self.scope_guild(ctx), player, item_id)
         await ctx.reply(ui.plain(f"\U0001f4e6 Unequipped `#{piece['id']}` {piece['item_key']}"), mention_author=False)
 
     @commands.hybrid_command(name="upgequip", aliases=["forge"], description="Upgrade equipment (+1 level).")
     async def upgequip(self, ctx: commands.Context, item_id: commands.Range[int, 1]) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         piece, cost = await self.bot.equipment.upgrade(self.scope_guild(ctx), player, item_id)
         await ctx.reply(
             embed=Theme.embed(
@@ -71,7 +73,7 @@ class EquipmentCog(GameMixin):
 
     @commands.hybrid_command(name="sellgear", description="Sell a piece of equipment for coins.")
     async def sellgear(self, ctx: commands.Context, item_id: commands.Range[int, 1]) -> None:
-        player, _ = await self.player_profile(ctx)
+        player = await self.player(ctx)
         piece, value = await self.bot.equipment.sell(self.scope_guild(ctx), player, item_id)
         await ctx.reply(
             ui.plain(

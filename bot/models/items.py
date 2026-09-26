@@ -15,7 +15,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from bot.content.registry import RarityTier
@@ -88,8 +88,8 @@ class Equipment:
     equipped: bool = False
     db_id: int | None = None
 
-    # Each +1 level adds 12% to all stats (compounding).
-    UPGRADE_GROWTH: ClassVar[float] = 0.12
+    # Forge growth per +1 level lives in game.json (equipment.forge_growth)
+    # and is read at call time so !reload_settings retunes it live.
 
     @property
     def display_name(self) -> str:
@@ -101,7 +101,9 @@ class Equipment:
         return self.attack * 2 + self.defense * 2 + self.luck * 3
 
     def stats_at_level(self, level: int) -> tuple[int, int, int]:
-        factor = (1 + self.UPGRADE_GROWTH) ** level
+        from bot.config import SETTINGS
+
+        factor = (1 + SETTINGS.equipment.forge_growth) ** level
         return round(self.attack * factor), round(self.defense * factor), round(self.luck * factor)
 
     def apply_level(self, level: int) -> None:

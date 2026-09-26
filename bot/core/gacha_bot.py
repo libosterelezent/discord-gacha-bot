@@ -6,7 +6,7 @@ background tasks.
 from __future__ import annotations
 
 import logging
-import random
+import sys
 import traceback
 from typing import Any
 
@@ -59,10 +59,9 @@ class GachaBot(commands.Bot):
 
         # content + infrastructure
         self.content = ContentRegistry.load(spawn_algorithm=SETTINGS.spawn.algorithm)
-        self.rng = random.Random()
         self.db = Database(CONFIG.database_url)
         self.bus = EventBus()
-        self.cooldowns = CooldownManager(SETTINGS)
+        self.cooldowns = CooldownManager(SETTINGS, self.db)
         self.sink = DiscordSink(self, self.db, self.bus, CONFIG.maintainer_guild_id)
 
         # service graph (economy first: others depend on it)
@@ -94,6 +93,16 @@ class GachaBot(commands.Bot):
         """
         SETTINGS.reload()
 
+    def reload_content(self) -> None:
+        """Reload the content JSON files in place.
+
+        Builds a fresh registry (fail-first: bad JSON raises before any
+        state is touched) and swaps its internals into the live registry
+        that every service references.
+        """
+        fresh = ContentRegistry.load(spawn_algorithm=SETTINGS.spawn.algorithm)
+        self.content.swap(fresh)
+
     # -- profile composition --------------------------------------------------------
 
     async def player_profile(self, guild_id: int | None, user_id: int) -> tuple[Any, Any]:
@@ -110,8 +119,10 @@ class GachaBot(commands.Bot):
             rarity = self.content.rarity(row["rarity"])
             if rarity is None:
                 continue
+            template = self.content.equipment_template(row["item_key"])
             player.equipped[row["slot"]] = Equipment(
-                db_id=row["id"], key=row["item_key"], name=row["item_key"].replace("_", " ").title(),
+                db_id=row["id"], key=row["item_key"],
+                name=template.name if template else row["item_key"].replace("_", " ").title(),
                 etype=EquipmentType.from_key(row["slot"]) or EquipmentType.WEAPON,
                 rarity=rarity,
                 attack=row["attack"], defense=row["defense"], luck=row["luck"],
@@ -124,6 +135,7 @@ class GachaBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         await self.db.connect()
+        await self.cooldowns.load()
         for service in self._services:
             await service.on_start()
         await self.sink.start()
@@ -167,10 +179,27 @@ class GachaBot(commands.Bot):
 
     # -- global error handling ------------------------------------------------------
 
+    @staticmethod
+    def _unwrap(error: BaseException) -> BaseException:
+        """Peel wrapper exceptions (CommandInvokeError, HybridAppCommandError …).
+
+        Hybrid commands wrap one level deeper than prefix commands, so a
+        single ``getattr(error, 'original')`` misses domain errors on the
+        slash path.
+        """
+        for _ in range(5):
+            inner = getattr(error, "original", None)
+            if inner is None:
+                inner = error.__cause__
+            if inner is None or inner is error:
+                break
+            error = inner
+        return error
+
     async def on_command_error(self, ctx: commands.Context, error: Exception) -> None:
         if hasattr(ctx.command, "on_error"):
             return
-        error = getattr(error, "original", error)
+        error = self._unwrap(error)
 
         if isinstance(error, commands.CommandNotFound):
             return
@@ -200,7 +229,7 @@ class GachaBot(commands.Bot):
         )
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        error = getattr(error, "original", error)
+        error = self._unwrap(error)
         if isinstance(error, GachaBotError):
             message = Theme.error_embed(str(error))
         elif isinstance(error, discord.app_commands.CommandOnCooldown):
@@ -220,8 +249,8 @@ class GachaBot(commands.Bot):
 
     async def on_error(self, event_method: str, *args: object, **kwargs: object) -> None:
         # last-resort net for non-command event handlers (on_message etc.)
-        exc = args[1] if len(args) > 1 and isinstance(args[1], BaseException) else None
-        if exc is not None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, BaseException):
             await self._report_error("event", f"in `{event_method}`", exc)
         else:
-            logger.exception("Unhandled error in event %s", event_method)
+            logger.error("Unhandled error in event %s (no exception info available)", event_method)
