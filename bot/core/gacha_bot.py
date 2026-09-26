@@ -26,6 +26,7 @@ from bot.services.equipment import EquipmentService
 from bot.services.gacha import GachaService
 from bot.services.hunt import HuntService
 from bot.services.huntbot import HuntBotService
+from bot.services.records import RecordService
 from bot.services.upgrades import UpgradeService
 from bot.ui.theme import Theme
 
@@ -65,6 +66,7 @@ class GachaBot(commands.Bot):
         self.sink = DiscordSink(self, self.db, self.bus, CONFIG.maintainer_guild_id)
 
         # service graph (economy first: others depend on it)
+        self.records = RecordService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self.economy = EconomyService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self.gacha = GachaService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self.equipment = EquipmentService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
@@ -78,7 +80,7 @@ class GachaBot(commands.Bot):
         self.huntbot = HuntBotService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self.badges = BadgeService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self._services: tuple[Any, ...] = (
-            self.economy, self.gacha, self.equipment, self.upgrades,
+            self.records, self.economy, self.gacha, self.equipment, self.upgrades,
             self.hunt, self.huntbot, self.badges,
         )
 
@@ -128,7 +130,16 @@ class GachaBot(commands.Bot):
                 attack=row["attack"], defense=row["defense"], luck=row["luck"],
                 level=row["level"], equipped=True,
             )
-        profile = StatProfile.compose(player, self.content.upgrade_effects())
+        # card sets: aggregate active bonuses from the player's collection
+        owned_rows = await self.db.fetch_all(
+            "SELECT item_key FROM inventory WHERE guild_id = :g AND user_id = :u",
+            {"g": player.guild_id, "u": user_id},
+        )
+        owned_keys = frozenset(r["item_key"] for r in owned_rows)
+        bonuses, titles = self.content.set_bonuses(owned_keys)
+        profile = StatProfile.compose(
+            player, self.content.upgrade_effects(), set_bonuses=bonuses, set_titles=titles
+        )
         return player, profile
 
     # -- lifecycle --------------------------------------------------------------

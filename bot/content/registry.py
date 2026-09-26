@@ -77,6 +77,78 @@ class BadgeSpec:
     scope: str = "guild"  # "guild" | "global"
 
 
+@dataclass(frozen=True, slots=True)
+class HuntModifier:
+    """A daily hunt modifier: small, transparent, rotating mutators."""
+
+    key: str
+    name: str
+    emoji: str
+    description: str
+    coin_mult: float = 1.0
+    xp_mult: float = 1.0
+    tier_bonus: int = 0
+    drop_mult: float = 1.0
+    luck_scale: float = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class EncounterChoice:
+    key: str
+    label: str
+    emoji: str
+    coins: tuple[int, int]
+    shards: tuple[int, int]
+    xp: tuple[int, int]
+    item_chance: float
+    flavor: str
+
+
+@dataclass(frozen=True, slots=True)
+class EncounterSpec:
+    """A rare hunt encounter with player-driven choices."""
+
+    key: str
+    name: str
+    emoji: str
+    description: str
+    weight: float
+    choices: tuple[EncounterChoice, ...]
+
+    def choice(self, key: str) -> EncounterChoice | None:
+        for choice in self.choices:
+            if choice.key == key:
+                return choice
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class SetTier:
+    size: int
+    bonus: dict[str, float]  # xp_pct / coin_pct / luck_pct
+    title: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CardSet:
+    """A themed group of cards granting cumulative bonuses when owned."""
+
+    key: str
+    name: str
+    emoji: str
+    description: str
+    cards: tuple[str, ...]
+    tiers: tuple[SetTier, ...]
+
+    def tiers_completed(self, owned: set[str] | frozenset[str]) -> tuple[SetTier, ...]:
+        have = sum(1 for key in self.cards if key in owned)
+        return tuple(t for t in self.tiers if have >= t.size)
+
+    def progress(self, owned: set[str] | frozenset[str]) -> tuple[int, int]:
+        have = sum(1 for key in self.cards if key in owned)
+        return have, len(self.cards)
+
+
 # ---------------------------------------------------------------------------
 # Spawn algorithms (pluggable strategies)
 # ---------------------------------------------------------------------------
@@ -143,6 +215,10 @@ class ContentRegistry:
         upgrades: dict[str, UpgradeSpec],
         badges: dict[str, BadgeSpec],
         spawn_algorithm: str = "weighted_luck",
+        sets: dict[str, CardSet] | None = None,
+        modifiers: list[HuntModifier] | None = None,
+        encounters: list[EncounterSpec] | None = None,
+        encounter_chance: float = 0.0,
     ) -> None:
         self._rarities = rarities
         self._tier_order = sorted(rarities.values(), key=lambda r: r.tier)
@@ -152,6 +228,10 @@ class ContentRegistry:
         self._upgrades = upgrades
         self._badges = badges
         self._spawn_algorithm = spawn_algorithm
+        self._sets = sets or {}
+        self._modifiers = tuple(modifiers or ())
+        self._encounters = tuple(encounters or ())
+        self._encounter_chance = encounter_chance
         self._build_indexes()
 
     def _build_indexes(self) -> None:
@@ -259,7 +339,77 @@ class ContentRegistry:
                 scope=entry.get("scope", "guild"),
             )
 
-        return cls(rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm)
+        sets: dict[str, CardSet] = {}
+        for entry in _read_json(directory / "sets.json"):
+            for card_key in entry["cards"]:
+                if card_key not in cards:
+                    raise ValueError(
+                        f"set '{entry['key']}' references unknown card '{card_key}'"
+                    )
+            tiers = tuple(
+                SetTier(size=int(t["size"]), bonus=dict(t.get("bonus", {})), title=t.get("title", ""))
+                for t in entry.get("tiers", [])
+            )
+            if not tiers:
+                raise ValueError(f"set '{entry['key']}' has no tiers")
+            sets[entry["key"]] = CardSet(
+                key=entry["key"],
+                name=entry["name"],
+                emoji=entry["emoji"],
+                description=entry.get("description", ""),
+                cards=tuple(entry["cards"]),
+                tiers=tiers,
+            )
+
+        modifiers: list[HuntModifier] = []
+        for entry in _read_json(directory / "hunt_modifiers.json"):
+            effects = entry.get("effects", {})
+            modifiers.append(
+                HuntModifier(
+                    key=entry["key"],
+                    name=entry["name"],
+                    emoji=entry["emoji"],
+                    description=entry.get("description", ""),
+                    coin_mult=float(effects.get("coin_mult", 1.0)),
+                    xp_mult=float(effects.get("xp_mult", 1.0)),
+                    tier_bonus=int(effects.get("tier_bonus", 0)),
+                    drop_mult=float(effects.get("drop_mult", 1.0)),
+                    luck_scale=float(effects.get("luck_scale", 1.0)),
+                )
+            )
+
+        encounters_payload = _read_json(directory / "encounters.json")
+        if not isinstance(encounters_payload, list):
+            encounters_payload = encounters_payload.get("encounters", [])
+        encounters: list[EncounterSpec] = []
+        for entry in encounters_payload:
+            choices = tuple(
+                EncounterChoice(
+                    key=c["key"], label=c["label"], emoji=c.get("emoji", ""),
+                    coins=(int(c["outcome"].get("coins", [0, 0])[0]), int(c["outcome"].get("coins", [0, 0])[1])),
+                    shards=(int(c["outcome"].get("shards", [0, 0])[0]), int(c["outcome"].get("shards", [0, 0])[1])),
+                    xp=(int(c["outcome"].get("xp", [0, 0])[0]), int(c["outcome"].get("xp", [0, 0])[1])),
+                    item_chance=float(c["outcome"].get("item_chance", 0.0)),
+                    flavor=c["outcome"].get("flavor", ""),
+                )
+                for c in entry.get("choices", [])
+            )
+            if not choices:
+                raise ValueError(f"encounter '{entry['key']}' has no choices")
+            encounters.append(
+                EncounterSpec(
+                    key=entry["key"], name=entry["name"], emoji=entry.get("emoji", "❓"),
+                    description=entry.get("description", ""),
+                    weight=float(entry.get("weight", 1.0)), choices=choices,
+                )
+            )
+
+        chance = 0.0
+        raw = _read_json(directory / "encounters.json")
+        if isinstance(raw, dict):
+            chance = float(raw.get("encounter_chance", 0.0))
+
+        return cls(rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm, sets, modifiers, encounters, chance)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -277,6 +427,10 @@ class ContentRegistry:
         self._enemies = other._enemies
         self._upgrades = other._upgrades
         self._badges = other._badges
+        self._sets = other._sets
+        self._modifiers = other._modifiers
+        self._encounters = other._encounters
+        self._encounter_chance = other._encounter_chance
         self._spawn_algorithm = other._spawn_algorithm
         self._build_indexes()
 
@@ -397,6 +551,88 @@ class ContentRegistry:
     @property
     def badges(self) -> Mapping[str, BadgeSpec]:
         return MappingProxyType(self._badges)
+
+    # -- card sets -----------------------------------------------------------
+
+    def equipment_roll_percentile(self, item) -> float | None:
+        """Stat-roll quality of an equipment instance (0.0–1.0).
+
+        Equipment rolls land in [85%, 115%] of template×rarity; this
+        recovers where in that band the item's primary stat rolled,
+        invariant under forging (the growth factor is divided out).
+        """
+        template = self._equipment.get(item.key)
+        if template is None:
+            return None
+        from bot.config import SETTINGS
+
+        growth = (1 + SETTINGS.equipment.forge_growth) ** item.level
+        mult = item.rarity.stat_multiplier
+        pairs = sorted(
+            ((template.base_attack, item.attack), (template.base_defense, item.defense),
+             (template.base_luck, item.luck)),
+            key=lambda p: p[0], reverse=True,
+        )
+        for base, stat in pairs:
+            if base > 0:
+                spread = stat / (base * mult * growth)
+                return min(1.0, max(0.0, (spread - 0.85) / 0.3))
+        return None
+
+    @property
+    def sets(self) -> Mapping[str, CardSet]:
+        return MappingProxyType(self._sets)
+
+    def set_(self, key: str) -> CardSet | None:
+        return self._sets.get(key)
+
+    def all_sets(self) -> list[CardSet]:
+        return list(self._sets.values())
+
+    def set_progress(self, owned_keys: set[str] | frozenset[str]) -> list[tuple[CardSet, int, int, tuple[SetTier, ...]]]:
+        """Per-set (set, owned_count, total, completed_tiers) for a player."""
+        return [
+            (card_set, *card_set.progress(owned_keys), card_set.tiers_completed(owned_keys))
+            for card_set in self._sets.values()
+        ]
+
+    def all_modifiers(self) -> list[HuntModifier]:
+        return list(self._modifiers)
+
+    # -- rare encounters --------------------------------------------------------
+
+    @property
+    def encounter_chance(self) -> float:
+        return self._encounter_chance
+
+    def all_encounters(self) -> list[EncounterSpec]:
+        return list(self._encounters)
+
+    def pick_encounter(self, rng) -> "EncounterSpec | None":
+        """Weighted pick from the encounter pool, or None if empty."""
+        if not self._encounters:
+            return None
+        weights = [e.weight for e in self._encounters]
+        return rng.choices(self._encounters, weights=weights, k=1)[0]
+
+    def modifier_for_date(self, day) -> HuntModifier | None:
+        """Deterministic pick from the pool for a given date (rotation)."""
+        if not self._modifiers:
+            return None
+        rng = random.Random(f"modifier:{day.isoformat()}")
+        return rng.choice(self._modifiers)
+
+    def set_bonuses(self, owned_keys: set[str] | frozenset[str]) -> tuple[dict[str, float], list[str]]:
+        """Aggregated active set bonuses and earned titles for an owner."""
+        totals: dict[str, float] = {}
+        titles: list[str] = []
+        for card_set in self._sets.values():
+            for tier in card_set.tiers_completed(owned_keys):
+                for stat, value in tier.bonus.items():
+                    totals[stat] = totals.get(stat, 0.0) + value
+                if tier.title:
+                    titles.append(tier.title)
+        return totals, titles
 
     def badge(self, key: str) -> BadgeSpec | None:
         return self._badges.get(key)

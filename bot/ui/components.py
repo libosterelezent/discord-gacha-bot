@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Sequence
 
+import discord
 from discord import ui
 
 from bot.ui.theme import Theme
@@ -27,6 +28,36 @@ if TYPE_CHECKING:
 def plain(text: str) -> str:
     """Marker for call sites intentionally using a plain text reply."""
     return text
+
+
+class SharePullButton(ui.Button):
+    """Reposts a pull highlight into the channel for everyone to see."""
+
+    def __init__(self, highlight: str, colour: int, custom_note: str = "") -> None:
+        super().__init__(
+            label="Share", emoji="\U0001f4e4",
+            style=discord.ButtonStyle.secondary, row=0,
+        )
+        self._highlight = highlight
+        self._colour = colour
+        self._note = custom_note
+        self._shared = False
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if self._shared:
+            await interaction.response.send_message(
+                "Already shared — spread the luck around.", ephemeral=True
+            )
+            return
+        self._shared = True
+        embed = Theme.embed(description=self._highlight, colour=self._colour)
+        if self._note:
+            embed.set_footer(text=self._note)
+        await interaction.response.send_message(embed=embed)
+        try:
+            self.disabled = True
+        except Exception:  # pragma: no cover - view already detached
+            pass
 
 
 def base_container(accent: int | None = None) -> tuple[ui.LayoutView, ui.Container]:
@@ -78,6 +109,7 @@ def profile_view(
     badges: Sequence[str] | None = None,
     battery_capacity: int = 24,
     pity_limit: int = 90,
+    set_lines: Sequence[str] | None = None,
 ) -> ui.LayoutView:
     xp_now, xp_next = player.xp_progress()
     stats = "\n".join(profile.summary_lines())
@@ -89,6 +121,10 @@ def profile_view(
     )
 
     extra: list[str] = []
+    if profile.set_titles:
+        extra.append("### Card Sets\n" + "\n".join(f"\u2022 {t}" for t in profile.set_titles))
+    if set_lines:
+        extra.append("\n".join(set_lines))
     if huntbot is not None:
         status = "\U0001f7e2 Active" if huntbot.active else "\U0001f534 Idle"
         extra.append(
@@ -111,7 +147,7 @@ def profile_view(
     )
 
 
-def pull_view(session: "PullSession", shard_emoji: str, pity_limit: int) -> ui.LayoutView:
+def pull_view(session: "PullSession", shard_emoji: str, pity_limit: int, puller: str | None = None) -> ui.LayoutView:
     outcomes = [o.describe() for o in session.outcomes]
     pity_note = " \U0001f6a8 **PITY!**" if any(o.pity_triggered for o in session.outcomes) else ""
     header = f"## \U0001f3a3 Pull Results x{len(session.outcomes)}{pity_note}"
@@ -119,7 +155,25 @@ def pull_view(session: "PullSession", shard_emoji: str, pity_limit: int) -> ui.L
     footer = (
         f"New {session.new_cards} \u00b7 +{session.shards_gained}{shard_emoji} \u00b7 best: {session.best.label}"
     )
-    return card_view(header, body, accent=session.best.colour, footer=footer)
+    view, container = base_container(session.best.colour if session.best else Theme.primary)
+    _header(container, header)
+    container.add_item(ui.Separator())
+    container.add_item(ui.TextDisplay(body))
+    container.add_item(ui.Separator())
+    container.add_item(ui.TextDisplay(f"-# {footer}"))
+    # share button for notable pulls (epic+): spreads the pull into the channel
+    if session.best is not None and session.best.tier >= 4:
+        best_outcome = max(session.outcomes, key=lambda o: o.rarity.tier)
+        container.add_item(
+            ui.ActionRow(
+                SharePullButton(
+                    highlight=best_outcome.describe(),
+                    colour=best_outcome.rarity.colour,
+                    custom_note=f"pulled by {puller}" if puller else Theme.footer(),
+                )
+            )
+        )
+    return view
 
 
 def hunt_view(
@@ -133,11 +187,14 @@ def hunt_view(
         lines.append(f"Scavenged {money_emoji} **{result.coins:,}** \u00b7 +{result.xp} XP")
     lines.append(f"-# your power **{result.power:,}** vs enemy **{result.enemy_power:,}**")
     body = "\n".join(lines)
+    footer = Theme.footer()
+    if result.modifier is not None:
+        footer = f"Today: {result.modifier.emoji} {result.modifier.name} — {result.modifier.description}"
     return card_view(
         f"## \U0001f3af The Hunt \u2014 {result.enemy.name}",
         body,
         accent=result.enemy.rarity.colour,
-        footer=Theme.footer(),
+        footer=footer,
     )
 
 
@@ -150,9 +207,17 @@ def equipment_view(owner: str, lines: Sequence[str], note: str | None = None) ->
     return card_view(f"## \U0001f392 {owner}'s Equipment", body, footer=note)
 
 
-def collection_view(owner: str, lines: Sequence[str], owned: int, total: int) -> ui.LayoutView:
+def collection_view(
+    owner: str,
+    lines: Sequence[str],
+    owned: int,
+    total: int,
+    set_lines: Sequence[str] | None = None,
+) -> ui.LayoutView:
     header = f"## \U0001f4d6 {owner}'s Collection"
     body = f"**{owned}**/{total} unique cards\n\n" + ("\n".join(lines) if lines else "*Nothing yet — go pull!*")
+    if set_lines:
+        body += "\n\n" + "\n".join(set_lines)
     return card_view(header, body, accent=Theme.primary)
 
 

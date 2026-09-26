@@ -54,12 +54,89 @@ class RegistryTest(unittest.TestCase):
         for template in self.registry.all_equipment():
             self.assertIn(template.slot, ("weapon", "armor", "amulet"))
 
+    def test_card_sets_reference_real_cards(self) -> None:
+        sets = self.registry.all_sets()
+        self.assertGreater(len(sets), 0)
+        for card_set in sets:
+            for key in card_set.cards:
+                self.assertIsNotNone(self.registry.card(key), f"{card_set.key} -> {key}")
+
+    def test_set_bonuses_aggregate_from_owned_cards(self) -> None:
+        beast = self.registry.set_("beast_court")
+        owned = set(beast.cards[:2])  # 2 of 3 -> tier 1 only
+        bonuses, titles = self.registry.set_bonuses(owned)
+        self.assertAlmostEqual(bonuses.get("coin_pct", 0.0), 0.03)
+        self.assertEqual(titles, ["Friend of Fangs"])
+        full, titles2 = self.registry.set_bonuses(set(beast.cards))
+        self.assertAlmostEqual(full.get("coin_pct", 0.0), 0.03)
+        self.assertAlmostEqual(full.get("luck_pct", 0.0), 0.01)
+        self.assertIn("Court Whisperer", titles2)
+
+    def test_hunt_modifier_pool_deterministic_per_date(self) -> None:
+        from datetime import date
+
+        pool = self.registry.all_modifiers()
+        self.assertGreater(len(pool), 4)
+        today = date(2026, 9, 26)
+        first = self.registry.modifier_for_date(today)
+        self.assertIs(first, self.registry.modifier_for_date(today))  # same object: deterministic
+        # rotation actually varies across dates (sample a week)
+        picks = {self.registry.modifier_for_date(date(2026, 9, d)).key for d in range(20, 27)}
+        self.assertGreater(len(picks), 1)
+
+    def test_equipment_roll_percentile_math(self) -> None:
+        import random
+
+        template = self.registry.equipment_template("war_scythe")
+        rarity = self.registry.rarity("rare")
+        low = template.roll(random.Random(0), rarity)
+        low.attack = round(template.base_attack * rarity.stat_multiplier * 0.85)
+        low.defense = 0
+        low.luck = 0
+        self.assertAlmostEqual(self.registry.equipment_roll_percentile(low), 0.0, places=1)
+
+        high = template.roll(random.Random(0), rarity)
+        high.attack = round(template.base_attack * rarity.stat_multiplier * 1.15)
+        high.defense = 0
+        high.luck = 0
+        self.assertAlmostEqual(self.registry.equipment_roll_percentile(high), 1.0, places=1)
+
+        mid = template.roll(random.Random(0), rarity)
+        mid.attack = round(template.base_attack * rarity.stat_multiplier * 1.0)
+        mid.defense = 0
+        mid.luck = 0
+        self.assertAlmostEqual(self.registry.equipment_roll_percentile(mid), 0.5, delta=0.02)
+
+        # forging must not change the percentile
+        forged = template.roll(random.Random(0), rarity)
+        forged.attack = round(template.base_attack * rarity.stat_multiplier * 1.0)
+        forged.defense = 0
+        forged.luck = 0
+        forged.level = 5
+        from bot.config import SETTINGS
+
+        factor = (1 + SETTINGS.equipment.forge_growth) ** 5
+        forged.attack = round(forged.attack * factor)
+        self.assertAlmostEqual(
+            self.registry.equipment_roll_percentile(forged), 0.5, delta=0.03
+        )
+
+    def test_stat_profile_applies_set_bonuses(self) -> None:
+        from bot.models.player import Player, StatProfile
+
+        player = Player(user_id=1, level=10)
+        base = StatProfile.compose(player, {}, set_bonuses={"coin_pct": 0.03, "xp_pct": 0.02})
+        self.assertAlmostEqual(base.coin_multiplier, 1.10 + 0.03)  # level 10 +1% per + 3%
+        self.assertAlmostEqual(base.xp_multiplier, 1.02)
+        self.assertAlmostEqual(base.luck, 0.0)
+
 
 class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.db = Database(_temp_db_url())
         await self.db.connect()
         self.registry = ContentRegistry.load()
+        self.registry._encounter_chance = 0.0  # deterministic hunts in tests
         self.bus = EventBus()
         self.cooldowns = CooldownManager.__new__(CooldownManager)  # replaced below
         from bot.config import SETTINGS
@@ -129,6 +206,48 @@ class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
         final = await self.economy.balance(self.GUILD, 777)
         self.assertGreaterEqual(final, 0)
         self.assertEqual(final, start - 100 * len(ok))
+
+    async def test_records_best_and_first_semantics(self) -> None:
+        from bot.services.records import RecordService
+
+        records = RecordService(self.db, self.registry, self.settings, self.bus, self.cooldowns)
+        await records.on_start()
+        self.assertTrue(await records.submit_max(1, "hunt_best", "Largest hunt", 10, 500))
+        self.assertFalse(await records.submit_max(1, "hunt_best", "Largest hunt", 20, 400))
+        self.assertTrue(await records.submit_max(1, "hunt_best", "Largest hunt", 20, 600))
+        rows = await records.all_records(1)
+        best = next(r for r in rows if r["key"] == "hunt_best")
+        self.assertEqual((best["user_id"], best["value"]), (20, 600))
+
+        self.assertTrue(await records.claim_first(1, "first_mythic", "First Mythic", 10))
+        self.assertFalse(await records.claim_first(1, "first_mythic", "First Mythic", 99))
+        first = next(r for r in await records.all_records(1) if r["key"] == "first_mythic")
+        self.assertEqual(first["user_id"], 10)
+
+    async def test_encounter_resolution_grants_rewards(self) -> None:
+        from bot.models.player import StatProfile
+
+        player = await self.economy.ensure_player(self.GUILD, self.USER)
+        profile = StatProfile.compose(player, self.registry.upgrade_effects())
+        encounter = next(
+            e for e in self.registry.all_encounters()
+            if e.key == "wandering_merchant"
+        )
+        haggle = encounter.choice("haggle")
+        assert haggle is not None
+        self.assertGreater(haggle.coins[0], 0)
+        balance_before = await self.economy.balance(self.GUILD, self.USER)
+        resolution = await self.hunt.resolve_encounter(
+            self.GUILD, player, profile, encounter, "haggle"
+        )
+        self.assertEqual(resolution.choice.key, "haggle")
+        self.assertGreaterEqual(resolution.coins, haggle.coins[0])
+        balance_after = await self.economy.balance(self.GUILD, self.USER)
+        self.assertEqual(balance_after, balance_before + resolution.coins)
+        audited = await self.db.fetch_val(
+            "SELECT COUNT(*) FROM economy_log WHERE reason = 'encounter:wandering_merchant'"
+        )
+        self.assertEqual(int(audited or 0), 1)
 
     async def test_hunt_roundtrip(self) -> None:
         from bot.models.player import StatProfile

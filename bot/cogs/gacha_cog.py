@@ -28,8 +28,16 @@ class GachaCog(GameMixin):
             return
         player = await self.player(ctx)
         session = await self.bot.gacha.pull(self.scope_guild(ctx), player, count)
+        for outcome in session.outcomes:
+            if outcome.roll_pct is not None and outcome.roll_pct >= 0.99:
+                await self.bot.badges.grant(self.scope_guild(ctx), ctx.author.id, "god_roller")
+            if outcome.rarity.tier >= 6:
+                await self.bot.records.claim_first(
+                    self.scope_guild(ctx), "first_mythic", "First Mythic pull",
+                    ctx.author.id, player.total_pulls,
+                )
         await ctx.reply(
-            view=ui.pull_view(session, SETTINGS.shards.emoji, SETTINGS.gacha.pity_limit),
+            view=ui.pull_view(session, SETTINGS.shards.emoji, SETTINGS.gacha.pity_limit, puller=ctx.author.display_name),
             mention_author=False,
         )
 
@@ -40,8 +48,14 @@ class GachaCog(GameMixin):
         owned, total = await self.bot.gacha.collection_progress(player.guild_id, target.id)
         cards = await self.bot.gacha.collection(player.guild_id, target.id)
         lines = [f"{c.rarity.emoji} **{c.name}** {c.rarity.stars} x{qty}" for c, qty in cards[:25]]
+        owned_keys = frozenset(c.key for c, _ in cards)
+        set_lines = [
+            f"{s.emoji} **{s.name}** \u2014 {have}/{total_cards}"
+            + (f" \u2713 {' \u00b7 '.join(t.title for t in tiers if t.title)}" if tiers else "")
+            for s, have, total_cards, tiers in self.bot.content.set_progress(owned_keys)
+        ]
         await ctx.reply(
-            view=ui.collection_view(target.display_name, lines, owned, total),
+            view=ui.collection_view(target.display_name, lines, owned, total, set_lines=set_lines),
             mention_author=False,
         )
 
@@ -72,7 +86,7 @@ class GachaCog(GameMixin):
         player = await self.player(ctx)
         session = await self.bot.gacha.pull(self.scope_guild(ctx), player, 1, use_shards=True)
         await ctx.reply(
-            view=ui.pull_view(session, SETTINGS.shards.emoji, SETTINGS.gacha.pity_limit),
+            view=ui.pull_view(session, SETTINGS.shards.emoji, SETTINGS.gacha.pity_limit, puller=ctx.author.display_name),
             mention_author=False,
         )
 

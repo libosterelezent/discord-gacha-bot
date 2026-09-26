@@ -31,7 +31,7 @@ from bot.core.exceptions import DatabaseError
 
 logger = logging.getLogger("gacha.database")
 
-SCHEMA_VERSION: int = 3
+SCHEMA_VERSION: int = 4
 
 
 def _ddl(dialect: str) -> str:
@@ -146,6 +146,16 @@ def _ddl(dialect: str) -> str:
     );
     CREATE INDEX IF NOT EXISTS idx_economy_log_owner ON economy_log(guild_id, user_id);
 
+    CREATE TABLE IF NOT EXISTS records (
+        guild_id BIGINT NOT NULL,
+        key      TEXT NOT NULL,
+        label    TEXT NOT NULL,
+        user_id  BIGINT NOT NULL,
+        value    BIGINT NOT NULL,
+        set_at   TEXT NOT NULL,
+        PRIMARY KEY (guild_id, key)
+    );
+
     CREATE TABLE IF NOT EXISTS log_channels (
         guild_id   BIGINT NOT NULL,
         category   TEXT NOT NULL,
@@ -232,9 +242,29 @@ def _ddl_statements(script: str) -> list[str]:
     return statements
 
 
+async def _migration_v4(conn: AsyncConnection, dialect: str) -> None:
+    """Version 4 — Hall of Records (guild-scoped historical bests & firsts)."""
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS records (
+                guild_id BIGINT NOT NULL,
+                key      TEXT NOT NULL,
+                label    TEXT NOT NULL,
+                user_id  BIGINT NOT NULL,
+                value    BIGINT NOT NULL,
+                set_at   TEXT NOT NULL,
+                PRIMARY KEY (guild_id, key)
+            )
+            """
+        )
+    )
+
+
 MIGRATIONS: Final[tuple[tuple[int, Callable[[AsyncConnection, str], Any]], ...]] = (
     (2, _migration_v2),
     (3, _migration_v3),
+    (4, _migration_v4),
 )
 
 Row = Mapping[str, Any]

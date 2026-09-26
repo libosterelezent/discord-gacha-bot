@@ -4,7 +4,9 @@ A modular Discord gacha game bot with a full player economy, a gacha
 banner with a real pity system, equippable & forgeable gear, hunts
 against rarity-tiered enemies, an automated **Huntbot** companion with
 offline progress, permanent upgrades, **guild-scoped gameplay** with
-global badges, and a maintainer **event-logging** system.
+global badges, and a maintainer **event-logging** system — plus
+**card sets**, **daily hunt modifiers**, **rare encounters**, **god
+rolls**, **pull sharing** and a per-server **Hall of Records**.
 
 Built with **discord.py 2.6+ (Components V2)**, **SQLAlchemy 2 async**
 (PostgreSQL or SQLite — same code) and Python 3.12+. Commands work
@@ -93,9 +95,17 @@ prefix is configurable by the maintainer.
 ### 🎯 Hunts & Profile
 | Command | Aliases | Description |
 |---|---|---|
-| `hunt` | — | Hunt a random enemy for coins, XP and loot (45s cooldown) |
-| `profile [@user]` | `me`, `stats` | Full profile: stats, gear, pity, huntbot, badges |
-| `hunt_info` | — | How hunting, luck and cooldowns work |
+| `hunt` | — | Hunt a random enemy for coins, XP and loot (45s cooldown) — may trigger a **rare encounter** with choices |
+| `profile [@user]` | `me`, `stats` | Full profile: stats, gear, pity, huntbot, badges, card sets |
+| `hunt_info` | — | How hunting, luck, cooldowns and today's modifier work |
+| `records` | `hof`, `hallofrecords` | This server's Hall of Records: historical bests & firsts |
+
+**Daily modifier:** every UTC day one mutator is active for all hunts
+(Blood Moon, Treasure Season, Fog, …) — shown on hunt cards and in
+`hunt_info`. **Card sets** grant small XP/coin/luck bonuses and titles
+as you complete themed card groups (see `collection`). **God rolls**
+(95%+ stat variance) are flagged on gear and a 99%+ roll awards the
+global 🔥 God Roller badge. Epic+ pulls carry a **Share** button.
 
 ### 🤖 Huntbot
 | Command | Description |
@@ -205,8 +215,8 @@ Three layers, all runnable headless — **no Discord token or network
 required**:
 
 ```bash
-python -m unittest discover -s tests   # 23 unit / smoke / UI tests
-python tools/simulate_run.py           # 52-assertion functional battery
+python -m unittest discover -s tests   # 30 unit / smoke / UI tests
+python tools/simulate_run.py           # 56-assertion functional battery
 python tools/abuse_run.py              # 63-assertion adversarial battery
 ```
 
@@ -244,7 +254,8 @@ config/game.json            maintainer tuning (cooldowns, costs, pity, spawn)
 bot/
 ├── config.py               env config + typed game-settings loader (hot-reloadable)
 ├── content/                JSON game content + registry + spawn algorithms
-│   └── data/               rarities / cards / equipment / enemies / upgrades / badges
+│   └── data/               rarities / cards / equipment / enemies / upgrades / badges /
+│                           sets / hunt modifiers / rare encounters
 ├── core/
 │   ├── database.py         SQLAlchemy async facade, guild-scoped schema, migrations
 │   ├── gacha_bot.py        Bot subclass: service graph, event bus, error handlers
@@ -257,9 +268,10 @@ bot/
 │   └── exceptions.py       domain exception hierarchy
 ├── models/                 player, stats, items (rarity = content data)
 ├── services/               game logic: economy, gacha, hunt, huntbot,
-│                           equipment, upgrades, badges
+│                           equipment, upgrades, badges, records
 ├── ui/                     theme (colours/footers), Components V2 builders,
-│                           interactive help (dropdown + buttons)
+│                           interactive help (dropdown + buttons),
+│                           interactive encounter choice cards
 ├── observability/          Discord channel logging sink (queued delivery)
 └── cogs/                   thin Discord adapters (hybrid commands)
 tests/                      headless unit / smoke / Components V2 tests

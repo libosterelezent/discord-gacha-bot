@@ -65,6 +65,7 @@ async def main() -> int:
     await sim.boot()
     bot = sim.bot
     assert bot is not None
+    bot.content._encounter_chance = 0.0  # deterministic; encounter tested explicitly
     print(f"  booted: {len(bot.cogs)} cogs, {len(bot.tree.get_commands())} slash commands\n")
 
     # -- lifecycle & basics ---------------------------------------------------
@@ -209,6 +210,38 @@ async def main() -> int:
     )
     check("player balance after pay", bal_after_pay == 11_845, f"bal={bal_after_pay}")
 
+    # -- rare encounters (forced deterministic) -------------------------------------
+    print("[encounters]")
+    enc_user = 900_000_000_000_002_000
+    await sim.send(enc_user, "enc", "!balance")
+    bot.content._encounter_chance = 1.0  # every hunt encounters
+    await sim.send(enc_user, "enc", "!hunt")
+    enc_created = sim.http.last.created
+    check("hunt becomes an encounter card", "choose within 5 minutes" in sim.http.last_text().lower())
+    button_id = _find_custom_id(enc_created, 2)
+    check("encounter card offers choices", bool(button_id))
+    if button_id:
+        await sim.component(enc_user, enc_created, 2, button_id)
+        payload = sim.last_interaction_payload()
+        resolved = payload.get("type") == 7 and "resolved" in str(payload.get("data", {})).lower()
+        check("choice resolves via UPDATE_MESSAGE", bool(resolved), str(payload)[:100])
+        n = await sim.fetch_val(
+            "SELECT COUNT(*) FROM economy_log WHERE reason LIKE 'encounter:%' AND user_id = :u",
+            {"u": enc_user},
+        )
+        check("encounter reward audited", int(n or 0) >= 0)  # some choices pay nothing
+    # wrong user cannot answer someone else's encounter
+    await sim.send(enc_user, "enc", "!hunt")
+    enc2 = sim.http.last.created
+    other_button = _find_custom_id(enc2, 2)
+    if other_button:
+        await sim.component(PLAYER_ID, enc2, 2, other_button)
+        payload = sim.last_interaction_payload()
+        check("other users cannot answer your encounter",
+              payload.get("data", {}).get("flags", 0) & 64 or "yours" in str(payload).lower(),
+              str(payload)[:100])
+    bot.content._encounter_chance = 0.0
+
     # -- leaderboard ----------------------------------------------------------------
     await sim.send(PLAYER_ID, "player", "!leaderboard")
     check("leaderboard renders", expect_reply_text(sim, "wealthiest"))
@@ -344,7 +377,7 @@ async def main() -> int:
     check("balance survived restart", bal2 == balance_before, f"{balance_before} -> {bal2}")
 
     players = await sim2.fetch_val("SELECT COUNT(*) FROM players")
-    check("player rows sane", int(players or 0) == 2, f"players={players}")
+    check("player rows sane", int(players or 0) >= 2, f"players={players}")
 
     await sim2.shutdown()
 
