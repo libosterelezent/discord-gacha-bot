@@ -232,9 +232,15 @@ Three layers, all runnable headless — **no Discord token or network
 required**:
 
 ```bash
-python -m unittest discover -s tests   # 33 unit / smoke / UI tests
+python -m unittest discover -s tests   # 39 unit / smoke / UI tests
 python tools/simulate_run.py           # 64-assertion functional battery
 python tools/abuse_run.py              # 76-assertion adversarial battery
+
+The guild layer is additionally race-hardened and tested: concurrent
+relic changes resolve to exactly one winner, concurrent expedition
+completions pay contributors exactly once (optimistic-claim guards,
+stress-run), week rollovers reset progress and re-open the relic, and
+leaderboards order correctly while excluding zero-progress guilds.
 ```
 
 The simulators replace Discord's HTTP layer with a recorder and

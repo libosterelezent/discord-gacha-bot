@@ -278,6 +278,92 @@ class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
             await svc.set_relic(556, "not_a_relic")
         self.assertEqual((await svc.get_relic(556)).key, "phoenix")
 
+    async def test_relic_unlocks_after_week_rollover(self) -> None:
+        from bot.services.guild import GuildProgressService
+
+        svc = GuildProgressService(self.db, self.registry, self.settings, self.bus, self.cooldowns, economy=self.economy)
+        await svc.set_relic(558, "phoenix")
+        with self.assertRaises(Exception):
+            await svc.set_relic(558, "greed_idol")
+        # simulate the week having rolled over
+        await self.db.execute(
+            "UPDATE guild_state SET relic_set_at = '2000-W01' WHERE guild_id = :g", {"g": 558}
+        )
+        spec = await svc.set_relic(558, "greed_idol")
+        self.assertEqual(spec.key, "greed_idol")
+
+    async def test_concurrent_relic_set_exactly_one_wins(self) -> None:
+        from bot.services.guild import GuildProgressService
+
+        svc = GuildProgressService(self.db, self.registry, self.settings, self.bus, self.cooldowns, economy=self.economy)
+        results = await asyncio.gather(
+            svc.set_relic(559, "phoenix"),
+            svc.set_relic(559, "greed_idol"),
+            svc.set_relic(559, "hunters_compass"),
+            return_exceptions=True,
+        )
+        winners = [r for r in results if not isinstance(r, Exception)]
+        self.assertEqual(len(winners), 1, f"expected exactly one winner, got {results}")
+        final = await svc.get_relic(559)
+        self.assertEqual(final.key, winners[0].key)
+
+    async def test_concurrent_expedition_completion_pays_once(self) -> None:
+        from bot.services.guild import GuildProgressService
+
+        svc = GuildProgressService(self.db, self.registry, self.settings, self.bus, self.cooldowns, economy=self.economy)
+        # warm the row, then race two bulk records across the finish line
+        await svc.record(560, 88, hunts=1)
+        results = await asyncio.gather(
+            svc.record(560, 88, hunts=10_000),
+            svc.record(560, 88, hunts=10_000),
+            return_exceptions=True,
+        )
+        self.assertTrue(all(not isinstance(r, Exception) for r in results), results)
+        payments = await self.db.fetch_val(
+            "SELECT COUNT(*) FROM economy_log WHERE user_id = :u AND reason LIKE 'expedition:%'",
+            {"u": 88},
+        )
+        self.assertEqual(int(payments or 0), 1, f"completion paid {payments} times")
+
+    async def test_expedition_week_rollover_resets_progress(self) -> None:
+        from bot.services.guild import GuildProgressService
+
+        svc = GuildProgressService(self.db, self.registry, self.settings, self.bus, self.cooldowns, economy=self.economy)
+        await svc.record(561, 89, hunts=50)
+        mid = await svc.expedition_status(561)
+        self.assertGreater(mid.progress, 0)
+        # force a stale week
+        await self.db.execute(
+            "UPDATE guild_state SET expedition_week = '2000-W01' WHERE guild_id = :g", {"g": 561}
+        )
+        after = await svc.expedition_status(561)
+        self.assertEqual(after.progress, 0)
+        self.assertFalse(after.done)
+        self.assertEqual(after.milestones_hit, ())
+
+    async def test_expedition_leaderboard_orders_and_filters(self) -> None:
+        from bot.services.guild import GuildProgressService
+
+        svc = GuildProgressService(self.db, self.registry, self.settings, self.bus, self.cooldowns, economy=self.economy)
+        await svc.record(570, 1, hunts=30)
+        await svc.record(571, 2, hunts=10)
+        await svc.record(572, 3, hunts=0)  # no progress -> excluded
+        board = await svc.expedition_leaderboard()
+        ids = [row["guild_id"] for row in board]
+        self.assertIn(570, ids)
+        self.assertIn(571, ids)
+        self.assertNotIn(572, ids)
+        self.assertLess(ids.index(570), ids.index(571))
+
+    async def test_record_ignores_global_scope_and_zero_guild(self) -> None:
+        from bot.services.guild import GuildProgressService
+
+        svc = GuildProgressService(self.db, self.registry, self.settings, self.bus, self.cooldowns, economy=self.economy)
+        await svc.record(None, 1, hunts=5)      # DM / global scope
+        await svc.record(0, 1, hunts=5)         # sentinel guild
+        rows = await self.db.fetch_val("SELECT COUNT(*) FROM guild_state")
+        self.assertEqual(int(rows or 0), 0)
+
     async def test_expedition_completes_and_pays_contributors(self) -> None:
         from bot.services.guild import GuildProgressService
 

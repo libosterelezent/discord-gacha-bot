@@ -152,10 +152,18 @@ class GuildProgressService(BaseService):
             raise GachaBotError(
                 "The relic can only be changed once per week — the forge needs to cool."
             )
-        await self.db.execute(
-            "UPDATE guild_state SET relic_key = :k, relic_set_at = :w WHERE guild_id = :g",
+        changed = await self.db.execute(
+            """
+            UPDATE guild_state SET relic_key = :k, relic_set_at = :w
+            WHERE guild_id = :g
+              AND (relic_key = '' OR relic_set_at IS NULL OR relic_set_at <> :w)
+            """,
             {"k": key, "w": week, "g": guild_id},
         )
+        if changed == 0:  # a concurrent set won the week's change
+            raise GachaBotError(
+                "The relic can only be changed once per week — the forge needs to cool."
+            )
         self.log.info("guild=%s activated relic %s", guild_id, key)
         await self.bus.publish(
             GameEvent(
@@ -260,14 +268,23 @@ class GuildProgressService(BaseService):
                 break  # milestones are ascending; nothing later can pass either
             hit.append(milestone)
             complete = milestone >= 1.0
-            await self.db.execute(
+            # optimistic guard: only one racer may claim a milestone; the
+            # expected-list check also blocks replays after completion
+            changed = await self.db.execute(
                 """
                 UPDATE guild_state
                 SET expedition_milestones = :m, expedition_done = :d
                 WHERE guild_id = :g
+                  AND expedition_done = 0
+                  AND expedition_milestones = :expected
                 """,
-                {"m": ",".join(f"{m}" for m in hit), "d": 1 if complete else 0, "g": guild_id},
+                {
+                    "m": ",".join(f"{m}" for m in hit), "d": 1 if complete else 0,
+                    "g": guild_id, "expected": ",".join(f"{m}" for m in hit[:-1]),
+                },
             )
+            if changed == 0:
+                return  # a concurrent evaluation already claimed it
             if complete:
                 await self.add_reputation(guild_id, spec.reputation)
                 await self._pay_completion(guild_id, spec)
