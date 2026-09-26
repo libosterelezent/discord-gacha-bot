@@ -26,6 +26,7 @@ from bot.services.equipment import EquipmentService
 from bot.services.gacha import GachaService
 from bot.services.hunt import HuntService
 from bot.services.huntbot import HuntBotService
+from bot.services.records import RecordService
 from bot.services.upgrades import UpgradeService
 from bot.ui.theme import Theme
 
@@ -65,6 +66,7 @@ class GachaBot(commands.Bot):
         self.sink = DiscordSink(self, self.db, self.bus, CONFIG.maintainer_guild_id)
 
         # service graph (economy first: others depend on it)
+        self.records = RecordService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self.economy = EconomyService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self.gacha = GachaService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self.equipment = EquipmentService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
@@ -78,7 +80,7 @@ class GachaBot(commands.Bot):
         self.huntbot = HuntBotService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self.badges = BadgeService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self._services: tuple[Any, ...] = (
-            self.economy, self.gacha, self.equipment, self.upgrades,
+            self.records, self.economy, self.gacha, self.equipment, self.upgrades,
             self.hunt, self.huntbot, self.badges,
         )
 

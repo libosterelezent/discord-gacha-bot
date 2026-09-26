@@ -68,6 +68,10 @@ class EconomyCog(GameMixin):
         player = await self.player(ctx)
         delta = await self.bot.economy.gamble(self.scope_guild(ctx), player, amount)
         if delta > 0:
+            await self.bot.records.submit_max(
+                self.scope_guild(ctx), "gamble_best", "Biggest gamble win",
+                ctx.author.id, delta,
+            )
             await ctx.reply(
                 embed=Theme.embed("\U0001f0cf You Won!", f"+{SETTINGS.money(delta)}\nNew balance: {SETTINGS.money(player.balance)}", Theme.success),
                 mention_author=False,

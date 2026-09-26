@@ -206,6 +206,23 @@ class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(final, 0)
         self.assertEqual(final, start - 100 * len(ok))
 
+    async def test_records_best_and_first_semantics(self) -> None:
+        from bot.services.records import RecordService
+
+        records = RecordService(self.db, self.registry, self.settings, self.bus, self.cooldowns)
+        await records.on_start()
+        self.assertTrue(await records.submit_max(1, "hunt_best", "Largest hunt", 10, 500))
+        self.assertFalse(await records.submit_max(1, "hunt_best", "Largest hunt", 20, 400))
+        self.assertTrue(await records.submit_max(1, "hunt_best", "Largest hunt", 20, 600))
+        rows = await records.all_records(1)
+        best = next(r for r in rows if r["key"] == "hunt_best")
+        self.assertEqual((best["user_id"], best["value"]), (20, 600))
+
+        self.assertTrue(await records.claim_first(1, "first_mythic", "First Mythic", 10))
+        self.assertFalse(await records.claim_first(1, "first_mythic", "First Mythic", 99))
+        first = next(r for r in await records.all_records(1) if r["key"] == "first_mythic")
+        self.assertEqual(first["user_id"], 10)
+
     async def test_hunt_roundtrip(self) -> None:
         from bot.models.player import StatProfile
 

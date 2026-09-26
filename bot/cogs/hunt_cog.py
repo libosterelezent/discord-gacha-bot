@@ -22,6 +22,11 @@ class HuntCog(GameMixin):
         player, profile = await self.player_profile(ctx)
         result: HuntResult = await self.bot.hunt.hunt(self.scope_guild(ctx), player, profile)
         view = ui.hunt_view(result, SETTINGS.currency.emoji)
+        if result.success:
+            await self.bot.records.submit_max(
+                self.scope_guild(ctx), "hunt_best", "Largest single hunt",
+                ctx.author.id, result.coins,
+            )
 
         # extra lines that don't fit the compact card
         extras: list[str] = []
@@ -71,6 +76,30 @@ class HuntCog(GameMixin):
                 pity_limit=SETTINGS.gacha.pity_limit,
                 set_lines=set_lines or None,
             ),
+            mention_author=False,
+        )
+
+    @commands.hybrid_command(name="records", aliases=["hallofrecords", "hof"], description="This server's hall of records.")
+    async def records(self, ctx: commands.Context) -> None:
+        rows = await self.bot.records.all_records(self.scope_guild(ctx) or 0)
+        if not rows:
+            await ctx.reply(
+                embed=Theme.embed("\U0001f3c5 Hall of Records", "*No history written yet — go make some.*"),
+                mention_author=False,
+            )
+            return
+        lines = []
+        for row in rows:
+            try:
+                date = row["set_at"][:10]
+            except (TypeError, ValueError):
+                date = "?"
+            lines.append(
+                f"\U0001f3c5 **{row['label']}** — <@{row['user_id']}> \u00b7 "
+                f"**{row['value']:,}** \u00b7 {date}"
+            )
+        await ctx.reply(
+            embed=Theme.embed("\U0001f3c5 Hall of Records", "\n".join(lines)),
             mention_author=False,
         )
 

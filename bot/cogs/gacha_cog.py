@@ -31,6 +31,11 @@ class GachaCog(GameMixin):
         for outcome in session.outcomes:
             if outcome.roll_pct is not None and outcome.roll_pct >= 0.99:
                 await self.bot.badges.grant(self.scope_guild(ctx), ctx.author.id, "god_roller")
+            if outcome.rarity.tier >= 6:
+                await self.bot.records.claim_first(
+                    self.scope_guild(ctx), "first_mythic", "First Mythic pull",
+                    ctx.author.id, player.total_pulls,
+                )
         await ctx.reply(
             view=ui.pull_view(session, SETTINGS.shards.emoji, SETTINGS.gacha.pity_limit, puller=ctx.author.display_name),
             mention_author=False,
