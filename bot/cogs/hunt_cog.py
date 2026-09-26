@@ -44,6 +44,17 @@ class HuntCog(GameMixin):
         player, profile = await self.bot.player_profile(self.scope_guild(ctx), target.id)
         hb = await self.bot.huntbot.get_state(player.guild_id, target.id)
         badges = await self.bot.badges.badge_strings(target.id, self.scope_guild(ctx))
+        owned_rows = await self.bot.db.fetch_all(
+            "SELECT item_key FROM inventory WHERE guild_id = :g AND user_id = :u",
+            {"g": player.guild_id, "u": target.id},
+        )
+        owned = frozenset(r["item_key"] for r in owned_rows)
+        set_lines = [
+            f"{s.emoji} **{s.name}** {have}/{total}"
+            + (f" \u2014 {' \u00b7 '.join(t.title for t in tiers if t.title)}" if tiers else "")
+            for s, have, total, tiers in self.bot.content.set_progress(owned)
+            if have > 0
+        ]
         await ctx.reply(
             view=ui.profile_view(
                 player,
@@ -54,6 +65,7 @@ class HuntCog(GameMixin):
                 badges=badges,
                 battery_capacity=SETTINGS.huntbot.battery_capacity,
                 pity_limit=SETTINGS.gacha.pity_limit,
+                set_lines=set_lines or None,
             ),
             mention_author=False,
         )

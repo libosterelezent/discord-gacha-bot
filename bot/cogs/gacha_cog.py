@@ -40,8 +40,14 @@ class GachaCog(GameMixin):
         owned, total = await self.bot.gacha.collection_progress(player.guild_id, target.id)
         cards = await self.bot.gacha.collection(player.guild_id, target.id)
         lines = [f"{c.rarity.emoji} **{c.name}** {c.rarity.stars} x{qty}" for c, qty in cards[:25]]
+        owned_keys = frozenset(c.key for c, _ in cards)
+        set_lines = [
+            f"{s.emoji} **{s.name}** \u2014 {have}/{total_cards}"
+            + (f" \u2713 {' \u00b7 '.join(t.title for t in tiers if t.title)}" if tiers else "")
+            for s, have, total_cards, tiers in self.bot.content.set_progress(owned_keys)
+        ]
         await ctx.reply(
-            view=ui.collection_view(target.display_name, lines, owned, total),
+            view=ui.collection_view(target.display_name, lines, owned, total, set_lines=set_lines),
             mention_author=False,
         )
 

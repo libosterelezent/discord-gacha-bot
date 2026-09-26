@@ -54,6 +54,33 @@ class RegistryTest(unittest.TestCase):
         for template in self.registry.all_equipment():
             self.assertIn(template.slot, ("weapon", "armor", "amulet"))
 
+    def test_card_sets_reference_real_cards(self) -> None:
+        sets = self.registry.all_sets()
+        self.assertGreater(len(sets), 0)
+        for card_set in sets:
+            for key in card_set.cards:
+                self.assertIsNotNone(self.registry.card(key), f"{card_set.key} -> {key}")
+
+    def test_set_bonuses_aggregate_from_owned_cards(self) -> None:
+        beast = self.registry.set_("beast_court")
+        owned = set(beast.cards[:2])  # 2 of 3 -> tier 1 only
+        bonuses, titles = self.registry.set_bonuses(owned)
+        self.assertAlmostEqual(bonuses.get("coin_pct", 0.0), 0.03)
+        self.assertEqual(titles, ["Friend of Fangs"])
+        full, titles2 = self.registry.set_bonuses(set(beast.cards))
+        self.assertAlmostEqual(full.get("coin_pct", 0.0), 0.03)
+        self.assertAlmostEqual(full.get("luck_pct", 0.0), 0.01)
+        self.assertIn("Court Whisperer", titles2)
+
+    def test_stat_profile_applies_set_bonuses(self) -> None:
+        from bot.models.player import Player, StatProfile
+
+        player = Player(user_id=1, level=10)
+        base = StatProfile.compose(player, {}, set_bonuses={"coin_pct": 0.03, "xp_pct": 0.02})
+        self.assertAlmostEqual(base.coin_multiplier, 1.10 + 0.03)  # level 10 +1% per + 3%
+        self.assertAlmostEqual(base.xp_multiplier, 1.02)
+        self.assertAlmostEqual(base.luck, 0.0)
+
 
 class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

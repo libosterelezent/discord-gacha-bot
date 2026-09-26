@@ -77,6 +77,33 @@ class BadgeSpec:
     scope: str = "guild"  # "guild" | "global"
 
 
+@dataclass(frozen=True, slots=True)
+class SetTier:
+    size: int
+    bonus: dict[str, float]  # xp_pct / coin_pct / luck_pct
+    title: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CardSet:
+    """A themed group of cards granting cumulative bonuses when owned."""
+
+    key: str
+    name: str
+    emoji: str
+    description: str
+    cards: tuple[str, ...]
+    tiers: tuple[SetTier, ...]
+
+    def tiers_completed(self, owned: set[str] | frozenset[str]) -> tuple[SetTier, ...]:
+        have = sum(1 for key in self.cards if key in owned)
+        return tuple(t for t in self.tiers if have >= t.size)
+
+    def progress(self, owned: set[str] | frozenset[str]) -> tuple[int, int]:
+        have = sum(1 for key in self.cards if key in owned)
+        return have, len(self.cards)
+
+
 # ---------------------------------------------------------------------------
 # Spawn algorithms (pluggable strategies)
 # ---------------------------------------------------------------------------
@@ -143,6 +170,7 @@ class ContentRegistry:
         upgrades: dict[str, UpgradeSpec],
         badges: dict[str, BadgeSpec],
         spawn_algorithm: str = "weighted_luck",
+        sets: dict[str, CardSet] | None = None,
     ) -> None:
         self._rarities = rarities
         self._tier_order = sorted(rarities.values(), key=lambda r: r.tier)
@@ -152,6 +180,7 @@ class ContentRegistry:
         self._upgrades = upgrades
         self._badges = badges
         self._spawn_algorithm = spawn_algorithm
+        self._sets = sets or {}
         self._build_indexes()
 
     def _build_indexes(self) -> None:
@@ -259,7 +288,29 @@ class ContentRegistry:
                 scope=entry.get("scope", "guild"),
             )
 
-        return cls(rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm)
+        sets: dict[str, CardSet] = {}
+        for entry in _read_json(directory / "sets.json"):
+            for card_key in entry["cards"]:
+                if card_key not in cards:
+                    raise ValueError(
+                        f"set '{entry['key']}' references unknown card '{card_key}'"
+                    )
+            tiers = tuple(
+                SetTier(size=int(t["size"]), bonus=dict(t.get("bonus", {})), title=t.get("title", ""))
+                for t in entry.get("tiers", [])
+            )
+            if not tiers:
+                raise ValueError(f"set '{entry['key']}' has no tiers")
+            sets[entry["key"]] = CardSet(
+                key=entry["key"],
+                name=entry["name"],
+                emoji=entry["emoji"],
+                description=entry.get("description", ""),
+                cards=tuple(entry["cards"]),
+                tiers=tiers,
+            )
+
+        return cls(rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm, sets)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -277,6 +328,7 @@ class ContentRegistry:
         self._enemies = other._enemies
         self._upgrades = other._upgrades
         self._badges = other._badges
+        self._sets = other._sets
         self._spawn_algorithm = other._spawn_algorithm
         self._build_indexes()
 
@@ -397,6 +449,37 @@ class ContentRegistry:
     @property
     def badges(self) -> Mapping[str, BadgeSpec]:
         return MappingProxyType(self._badges)
+
+    # -- card sets -----------------------------------------------------------
+
+    @property
+    def sets(self) -> Mapping[str, CardSet]:
+        return MappingProxyType(self._sets)
+
+    def set_(self, key: str) -> CardSet | None:
+        return self._sets.get(key)
+
+    def all_sets(self) -> list[CardSet]:
+        return list(self._sets.values())
+
+    def set_progress(self, owned_keys: set[str] | frozenset[str]) -> list[tuple[CardSet, int, int, tuple[SetTier, ...]]]:
+        """Per-set (set, owned_count, total, completed_tiers) for a player."""
+        return [
+            (card_set, *card_set.progress(owned_keys), card_set.tiers_completed(owned_keys))
+            for card_set in self._sets.values()
+        ]
+
+    def set_bonuses(self, owned_keys: set[str] | frozenset[str]) -> tuple[dict[str, float], list[str]]:
+        """Aggregated active set bonuses and earned titles for an owner."""
+        totals: dict[str, float] = {}
+        titles: list[str] = []
+        for card_set in self._sets.values():
+            for tier in card_set.tiers_completed(owned_keys):
+                for stat, value in tier.bonus.items():
+                    totals[stat] = totals.get(stat, 0.0) + value
+                if tier.title:
+                    titles.append(tier.title)
+        return totals, titles
 
     def badge(self, key: str) -> BadgeSpec | None:
         return self._badges.get(key)

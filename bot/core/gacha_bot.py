@@ -128,7 +128,16 @@ class GachaBot(commands.Bot):
                 attack=row["attack"], defense=row["defense"], luck=row["luck"],
                 level=row["level"], equipped=True,
             )
-        profile = StatProfile.compose(player, self.content.upgrade_effects())
+        # card sets: aggregate active bonuses from the player's collection
+        owned_rows = await self.db.fetch_all(
+            "SELECT item_key FROM inventory WHERE guild_id = :g AND user_id = :u",
+            {"g": player.guild_id, "u": user_id},
+        )
+        owned_keys = frozenset(r["item_key"] for r in owned_rows)
+        bonuses, titles = self.content.set_bonuses(owned_keys)
+        profile = StatProfile.compose(
+            player, self.content.upgrade_effects(), set_bonuses=bonuses, set_titles=titles
+        )
         return player, profile
 
     # -- lifecycle --------------------------------------------------------------

@@ -78,6 +78,7 @@ def profile_view(
     badges: Sequence[str] | None = None,
     battery_capacity: int = 24,
     pity_limit: int = 90,
+    set_lines: Sequence[str] | None = None,
 ) -> ui.LayoutView:
     xp_now, xp_next = player.xp_progress()
     stats = "\n".join(profile.summary_lines())
@@ -89,6 +90,10 @@ def profile_view(
     )
 
     extra: list[str] = []
+    if profile.set_titles:
+        extra.append("### Card Sets\n" + "\n".join(f"\u2022 {t}" for t in profile.set_titles))
+    if set_lines:
+        extra.append("\n".join(set_lines))
     if huntbot is not None:
         status = "\U0001f7e2 Active" if huntbot.active else "\U0001f534 Idle"
         extra.append(
@@ -150,9 +155,17 @@ def equipment_view(owner: str, lines: Sequence[str], note: str | None = None) ->
     return card_view(f"## \U0001f392 {owner}'s Equipment", body, footer=note)
 
 
-def collection_view(owner: str, lines: Sequence[str], owned: int, total: int) -> ui.LayoutView:
+def collection_view(
+    owner: str,
+    lines: Sequence[str],
+    owned: int,
+    total: int,
+    set_lines: Sequence[str] | None = None,
+) -> ui.LayoutView:
     header = f"## \U0001f4d6 {owner}'s Collection"
     body = f"**{owned}**/{total} unique cards\n\n" + ("\n".join(lines) if lines else "*Nothing yet — go pull!*")
+    if set_lines:
+        body += "\n\n" + "\n".join(set_lines)
     return card_view(header, body, accent=Theme.primary)
 
 

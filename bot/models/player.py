@@ -64,14 +64,25 @@ class StatProfile:
     coin_multiplier: float
     cooldown_multiplier: float
     equipped_items: tuple[Equipment, ...]
+    xp_multiplier: float = 1.0
+    set_titles: tuple[str, ...] = ()
 
     @classmethod
-    def compose(cls, player: Player, upgrade_effects: dict[str, float]) -> "StatProfile":
+    def compose(
+        cls,
+        player: Player,
+        upgrade_effects: dict[str, float],
+        set_bonuses: dict[str, float] | None = None,
+        set_titles: tuple[str, ...] = (),
+    ) -> "StatProfile":
         """Factory: derive effective stats from player state.
 
         `upgrade_effects` maps upgrade keys to their per-level bonus
         (provided by the content registry), e.g. {"luck": 0.02, ...}.
+        `set_bonuses` are aggregated card-set bonuses (xp_pct/coin_pct/
+        luck_pct); they are deliberately small and horizontal.
         """
+        bonuses = set_bonuses or {}
         atk = dfn = luk = 0
         equipped: list[Equipment] = []
         for item in player.equipped.values():
@@ -85,16 +96,20 @@ class StatProfile:
         luck_rating = luk + player.upgrades.get("luck", 0) * 2
         base_luck = luck_rating * 0.005                     # every luck point: +0.5%
         bonus_luck = player.upgrades.get("luck", 0) * upgrade_effects.get("luck", 0.0)
-        coin_mult = 1.0 + player.level * 0.01 + player.upgrades.get("greed", 0) * upgrade_effects.get("greed", 0.0)
+        set_luck = bonuses.get("luck_pct", 0.0)
+        coin_mult = 1.0 + player.level * 0.01 + player.upgrades.get("greed", 0) * upgrade_effects.get("greed", 0.0) + bonuses.get("coin_pct", 0.0)
         cd_mult = max(0.4, 1.0 - player.upgrades.get("swiftness", 0) * upgrade_effects.get("swiftness", 0.0))
+        xp_mult = 1.0 + bonuses.get("xp_pct", 0.0)
 
         return cls(
             attack=atk,
             defense=dfn,
-            luck=min(base_luck + bonus_luck, 1.5),  # hard cap 150%
+            luck=min(base_luck + bonus_luck + set_luck, 1.5),  # hard cap 150%
             coin_multiplier=coin_mult,
             cooldown_multiplier=cd_mult,
             equipped_items=tuple(equipped),
+            xp_multiplier=xp_mult,
+            set_titles=set_titles,
         )
 
     @property
@@ -108,6 +123,8 @@ class StatProfile:
             f"\U0001f380 Luck: **{self.luck * 100:.1f}%**",
             f"\U0001f999 Coin bonus: **x{self.coin_multiplier:.2f}**",
         ]
+        if self.xp_multiplier != 1.0:
+            lines.append(f"\u2728 XP bonus: **x{self.xp_multiplier:.2f}** (card sets)")
         if self.equipped_items:
             lines.append("__Equipped:__")
             lines.extend(f"\u2022 {e}" for e in sorted(self.equipped_items, key=lambda x: x.etype.name))

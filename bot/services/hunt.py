@@ -145,7 +145,7 @@ class HuntService(BaseService):
         if success:
             variance = self._rng.uniform(0.85, 1.2)
             coin_reward = int(enemy.base_coins * variance * profile.coin_multiplier)
-            xp_reward = int(enemy.base_xp * self._rng.uniform(0.9, 1.15))
+            xp_reward = int(enemy.base_xp * self._rng.uniform(0.9, 1.15) * profile.xp_multiplier)
             if (drop := self._roll_equipment_drop(enemy, profile)) is not None:
                 drops.append(drop)
             card_key = self._roll_card_drop(enemy, profile)
