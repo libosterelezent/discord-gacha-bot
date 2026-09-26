@@ -93,6 +93,16 @@ class GachaBot(commands.Bot):
         """
         SETTINGS.reload()
 
+    def reload_content(self) -> None:
+        """Reload the content JSON files in place.
+
+        Builds a fresh registry (fail-first: bad JSON raises before any
+        state is touched) and swaps its internals into the live registry
+        that every service references.
+        """
+        fresh = ContentRegistry.load(spawn_algorithm=SETTINGS.spawn.algorithm)
+        self.content.swap(fresh)
+
     # -- profile composition --------------------------------------------------------
 
     async def player_profile(self, guild_id: int | None, user_id: int) -> tuple[Any, Any]:

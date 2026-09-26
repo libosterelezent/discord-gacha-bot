@@ -306,3 +306,55 @@ class EconomyService(BaseService):
             },
         )
         return player.level if levelled else None
+
+    # -- maintainer data access --------------------------------------------------------
+
+    async def player_row(self, guild_id: int | None, user_id: int) -> dict | None:
+        """Raw player row (scope-resolved) for inspection/tooling."""
+        scope = scope_id(guild_id, self.settings)
+        row = await self.db.fetch_one(
+            "SELECT * FROM players WHERE guild_id = :g AND user_id = :u", {"g": scope, "u": user_id}
+        )
+        return dict(row) if row else None
+
+    async def set_balance(self, guild_id: int | None, user_id: int, amount: int, reason: str) -> int:
+        """Overwrite a player's balance (audited). Returns the new balance."""
+        if amount < 0:
+            raise NegativeAmountError()
+        scope = scope_id(guild_id, self.settings)
+        now = _now_iso()
+        async with self.db.transaction() as conn:
+            await conn.execute(
+                text("UPDATE players SET balance = :b, updated_at = :t WHERE guild_id = :g AND user_id = :u"),
+                {"b": amount, "t": now, "g": scope, "u": user_id},
+            )
+            await conn.execute(
+                _SQL_INSERT_ECO_LOG,
+                {"g": scope, "u": user_id, "d": amount, "r": reason, "b": amount, "t": now},
+            )
+        await self._publish("admin", "set_balance", guild_id, user_id, f"balance set to {amount:,}")
+        return amount
+
+    async def set_level(self, guild_id: int | None, user_id: int, level: int) -> int:
+        """Overwrite a player's level."""
+        if level < 1:
+            raise NegativeAmountError()
+        scope = scope_id(guild_id, self.settings)
+        await self.db.execute(
+            "UPDATE players SET level = :lvl, updated_at = :t WHERE guild_id = :g AND user_id = :u",
+            {"lvl": level, "t": _now_iso(), "g": scope, "u": user_id},
+        )
+        await self._publish("admin", "set_level", guild_id, user_id, f"level set to {level}")
+        return level
+
+    async def set_shards(self, guild_id: int | None, user_id: int, amount: int) -> int:
+        """Overwrite a player's shard balance."""
+        if amount < 0:
+            raise NegativeAmountError()
+        scope = scope_id(guild_id, self.settings)
+        await self.db.execute(
+            "UPDATE players SET shards = :s, updated_at = :t WHERE guild_id = :g AND user_id = :u",
+            {"s": amount, "t": _now_iso(), "g": scope, "u": user_id},
+        )
+        await self._publish("admin", "set_shards", guild_id, user_id, f"shards set to {amount:,}")
+        return amount

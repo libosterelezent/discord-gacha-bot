@@ -245,6 +245,24 @@ class ContentRegistry:
 
         return cls(rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm)
 
+    # -- lifecycle -----------------------------------------------------------
+
+    def swap(self, other: "ContentRegistry") -> None:
+        """Adopt another registry's content in place.
+
+        Services hold a reference to *this* instance, so swapping the
+        internals (rather than the object) is what makes content hot
+        reloads visible everywhere at once.
+        """
+        self._rarities = other._rarities
+        self._tier_order = other._tier_order
+        self._cards = other._cards
+        self._equipment = other._equipment
+        self._enemies = other._enemies
+        self._upgrades = other._upgrades
+        self._badges = other._badges
+        self._spawn_algorithm = other._spawn_algorithm
+
     # -- rarity API ----------------------------------------------------------
 
     @property
