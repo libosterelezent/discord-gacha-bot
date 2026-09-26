@@ -307,12 +307,56 @@ class Simulator:
 
     async def send(self, user_id: int, name: str, content: str) -> None:
         assert self.bot is not None
+        self._ensure_member(user_id, name)
         message = discord.Message(
             state=self.state, channel=self.channel,
             data=_message_payload(content, _user_payload(user_id, name)),
         )
         self.bot.dispatch("message", message)
         await asyncio.sleep(0)  # let the command task run
+        await self._drain()
+
+    async def send_nowait(self, user_id: int, name: str, content: str) -> None:
+        """Dispatch without draining — for racing multiple commands."""
+        assert self.bot is not None
+        self._ensure_member(user_id, name)
+        message = discord.Message(
+            state=self.state, channel=self.channel,
+            data=_message_payload(content, _user_payload(user_id, name)),
+        )
+        self.bot.dispatch("message", message)
+
+    def _ensure_member(self, user_id: int, name: str) -> None:
+        """Cache the member so converters never hit the (nonexistent) REST fallback.
+
+        MemberConverter queries the REST API for uncached members, guarded
+        by ws.is_ratelimited() — without a gateway that crashes. Real bots
+        always have a websocket; the simulator registers members up front.
+        """
+        if user_id in self.guild._members:
+            return
+        member = discord.Member(data=_member_payload(user_id, name), guild=self.guild, state=self.state)
+        self.guild._add_member(member)
+
+    async def drain(self) -> None:
+        await self._drain()
+
+    def dm_channel(self, user_id: int, name: str) -> "discord.DMChannel":
+        """A DM channel with the bot for a given user."""
+        assert self.bot is not None
+        return discord.DMChannel(
+            state=self.state, me=self._client_user,
+            data={"id": str(_snowflake()), "recipients": [_user_payload(user_id, name)]},
+        )
+
+    async def send_dm(self, user_id: int, name: str, content: str) -> None:
+        assert self.bot is not None
+        channel = self.dm_channel(user_id, name)
+        payload = _message_payload(content, _user_payload(user_id, name))
+        payload["channel_id"] = str(channel.id)
+        message = discord.Message(state=self.state, channel=channel, data=payload)
+        self.bot.dispatch("message", message)
+        await asyncio.sleep(0)
         await self._drain()
 
     async def _drain(self) -> None:
