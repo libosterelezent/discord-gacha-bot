@@ -138,13 +138,16 @@ class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
         result = await self.hunt.hunt(self.GUILD, player, profile)
         self.assertIsNotNone(result.enemy)
 
-    @unittest.expectedFailure  # TODO: fixed by global-badge sentinel change
     async def test_badges_no_duplicate_grant(self) -> None:
         await self.badges.grant(self.GUILD, self.USER, "veteran")
         await self.badges.grant(self.GUILD, self.USER, "veteran")
         held = await self.badges.player_badges(self.USER, self.GUILD)
         keys = [spec.key for spec, _ in held]
         self.assertEqual(keys.count("veteran"), 1)
+        # revoke actually removes the global badge
+        await self.badges.revoke(self.GUILD, self.USER, "veteran")
+        held = await self.badges.player_badges(self.USER, self.GUILD)
+        self.assertEqual([spec.key for spec, _ in held], [])
 
     async def test_transfer_concurrent_cannot_double_spend(self) -> None:
         sender = await self.economy.ensure_player(self.GUILD, self.USER)
