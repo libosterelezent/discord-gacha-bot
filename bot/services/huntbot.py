@@ -212,17 +212,43 @@ class HuntBotService(BaseService):
         )
 
     async def collect(self, guild_id: int | None, player: Player, harvest_bonus: float = 0.0) -> tuple[int, list]:
-        """Sweep unclaimed rewards into the player's balance/inventory."""
+        """Sweep unclaimed rewards into the player's balance/inventory.
+
+        The huntbots row is claimed with an optimistic guard
+        (WHERE unclaimed_coins = :seen AND battery = :seen) inside the
+        same transaction that credits the player, so two concurrent
+        collects cannot both bank the same rewards.
+        """
         from bot.models.items import Equipment
 
         state = await self.require_state(player.guild_id, player.user_id)
-        coins = int(state.unclaimed_coins * (1 + harvest_bonus))
-        items: list[Equipment] = []
-        if not coins and not state.unclaimed_items:
+        if not state.unclaimed_coins and not state.unclaimed_items and not state.battery:
             raise HuntBotError("Nothing to collect — the battery is still charging.")
-
         now = _now_iso()
         async with self.db.transaction() as conn:
+            claim = (
+                await conn.execute(
+                    text(
+                        """
+                        UPDATE huntbots
+                        SET unclaimed_coins = 0, battery = 0,
+                            last_tick = :t, hunts_done = hunts_done + :h
+                        WHERE guild_id = :g AND user_id = :u
+                          AND unclaimed_coins = :seen_coins AND battery = :seen_battery
+                        """
+                    ),
+                    {
+                        "t": now, "h": state.battery, "g": player.guild_id, "u": player.user_id,
+                        "seen_coins": state.unclaimed_coins, "seen_battery": state.battery,
+                    },
+                )
+            ).rowcount
+            if claim == 0:
+                # a concurrent collect claimed this bank between our read and write
+                raise HuntBotError("Nothing to collect — the battery is still charging.")
+
+            coins = int(state.unclaimed_coins * (1 + harvest_bonus))
+            items: list[Equipment] = []
             if coins:
                 await conn.execute(
                     text("UPDATE players SET balance = balance + :c, updated_at = :t WHERE guild_id = :g AND user_id = :u"),
@@ -232,8 +258,14 @@ class HuntBotService(BaseService):
                     _SQL_ECO_LOG,
                     {"g": player.guild_id, "u": player.user_id, "d": coins, "r": "huntbot:collect", "b": player.balance + coins, "t": now},
                 )
-            for key in state.unclaimed_items:
-                template = self.content.equipment_template(key)
+            item_rows = (
+                await conn.execute(
+                    text("SELECT item_key FROM huntbot_items WHERE guild_id = :g AND user_id = :u"),
+                    {"g": player.guild_id, "u": player.user_id},
+                )
+            ).mappings().all()
+            for row in item_rows:
+                template = self.content.equipment_template(row["item_key"])
                 if template is None:
                     continue
                 item = template.roll(self._rng, self.content.lowest_tier)
@@ -252,17 +284,6 @@ class HuntBotService(BaseService):
             await conn.execute(
                 text("DELETE FROM huntbot_items WHERE guild_id = :g AND user_id = :u"),
                 {"g": player.guild_id, "u": player.user_id},
-            )
-            await conn.execute(
-                text(
-                    """
-                    UPDATE huntbots
-                    SET unclaimed_coins = 0, battery = 0,
-                        last_tick = :t, hunts_done = hunts_done + :h
-                    WHERE guild_id = :g AND user_id = :u
-                    """
-                ),
-                {"t": now, "h": state.battery, "g": player.guild_id, "u": player.user_id},
             )
         player.balance += coins
         self.log.info("user=%s collected %d coins, %d items from huntbot", player.user_id, coins, len(items))
