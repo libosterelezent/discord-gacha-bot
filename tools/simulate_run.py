@@ -20,7 +20,7 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(_TMP) / 'sim.db'}"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from simulator import (  # noqa: E402
-    CHANNEL_ID, GUILD_ID, OWNER_ID, PLAYER_ID, Simulator,
+    CHANNEL_ID, GUILD_ID, OWNER_ID, PLAYER_ID, Simulator, VICTIM_ID,
 )
 
 PASSED: list[str] = []
@@ -209,6 +209,35 @@ async def main() -> int:
         {"g": GUILD_ID, "u": PLAYER_ID},
     )
     check("player balance after pay", bal_after_pay == 11_845, f"bal={bal_after_pay}")
+
+    # -- guild layer ------------------------------------------------------------------
+    print("[guild]")
+    await sim.send(PLAYER_ID, "player", "!guild")
+    check("guild card renders", "reputation" in sim.http.last_text().lower())
+
+    await sim.send(PLAYER_ID, "player", "!relic set bogus")
+    check("unknown relic rejected", "unknown relic" in sim.http.last_text().lower())
+
+    await sim.send(PLAYER_ID, "player", "!relic set phoenix")
+    check("relic activated", "phoenix" in sim.http.last_text().lower() and "activated" in sim.http.last_text().lower())
+    await sim.send(PLAYER_ID, "player", "!relic set greed_idol")
+    check("relic locked for the week", "once per week" in sim.http.last_text().lower())
+
+    await sim.send(VICTIM_ID, "victim", "!relic set greed_idol")
+    check("relic lock is server-wide (other member blocked)",
+          "once per week" in sim.http.last_text().lower())
+
+    await sim.send(PLAYER_ID, "player", "!relic")
+    check("relic listing marks active", "active" in sim.http.last_text().lower())
+
+    await sim.send(PLAYER_ID, "player", "!expedition")
+    exp_text = sim.http.last_text()
+    check("expedition card renders", "expedition" in exp_text.lower() or "%”" in exp_text
+          or "milestones" in exp_text.lower())
+
+    # relic bonus must show up in the profile of a fresh member
+    await sim.send(VICTIM_ID, "victim", "!profile")
+    check("relic bonus visible in profile", "xp bonus" in sim.http.last_text().lower())
 
     # -- rare encounters (forced deterministic) -------------------------------------
     print("[encounters]")

@@ -100,6 +100,23 @@ prefix is configurable by the maintainer.
 | `hunt_info` | — | How hunting, luck, cooldowns and today's modifier work |
 | `records` | `hof`, `hallofrecords` | This server's Hall of Records: historical bests & firsts |
 
+### 🏘️ Guild
+| Command | Description |
+|---|---|
+| `guild` | Server identity: reputation, level & title, active relic, weekly expedition, top hunters |
+| `relic` | List the server relics |
+| `relic set <key>` | Activate one relic for the whole server (**changeable once per week**) |
+| `expedition` | This week's guild expedition: progress bar, milestones, cross-guild standings |
+
+The server itself levels up from ordinary play (hunts +2 rep, pulls +1,
+expedition milestones +150). Relics are small server-wide passives
+(Phoenix +2% XP, Greed Idol +3% coins, Hunter's Compass +2% luck,
+Hearthstone +1%/+1%). Expeditions are weekly objectives (Great Hunt /
+Treasure Rush / Collector's War) fed by normal gameplay — milestones
+give reputation, completion pays every contributor, and the
+cross-guild standings rank every server the bot is in for the week:
+asynchronous server-vs-server with no direct combat.
+
 **Daily modifier:** every UTC day one mutator is active for all hunts
 (Blood Moon, Treasure Season, Fog, …) — shown on hunt cards and in
 `hunt_info`. **Card sets** grant small XP/coin/luck bonuses and titles
@@ -215,9 +232,9 @@ Three layers, all runnable headless — **no Discord token or network
 required**:
 
 ```bash
-python -m unittest discover -s tests   # 30 unit / smoke / UI tests
-python tools/simulate_run.py           # 56-assertion functional battery
-python tools/abuse_run.py              # 63-assertion adversarial battery
+python -m unittest discover -s tests   # 33 unit / smoke / UI tests
+python tools/simulate_run.py           # 64-assertion functional battery
+python tools/abuse_run.py              # 76-assertion adversarial battery
 ```
 
 The simulators replace Discord's HTTP layer with a recorder and
@@ -255,7 +272,8 @@ bot/
 ├── config.py               env config + typed game-settings loader (hot-reloadable)
 ├── content/                JSON game content + registry + spawn algorithms
 │   └── data/               rarities / cards / equipment / enemies / upgrades / badges /
-│                           sets / hunt modifiers / rare encounters
+│                           sets / hunt modifiers / rare encounters /
+│                           relics / expeditions
 ├── core/
 │   ├── database.py         SQLAlchemy async facade, guild-scoped schema, migrations
 │   ├── gacha_bot.py        Bot subclass: service graph, event bus, error handlers
@@ -268,7 +286,8 @@ bot/
 │   └── exceptions.py       domain exception hierarchy
 ├── models/                 player, stats, items (rarity = content data)
 ├── services/               game logic: economy, gacha, hunt, huntbot,
-│                           equipment, upgrades, badges, records
+│                           equipment, upgrades, badges, records,
+│                           guild progression (rep/relics/expeditions)
 ├── ui/                     theme (colours/footers), Components V2 builders,
 │                           interactive help (dropdown + buttons),
 │                           interactive encounter choice cards

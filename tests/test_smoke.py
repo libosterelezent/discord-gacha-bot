@@ -249,6 +249,63 @@ class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(int(audited or 0), 1)
 
+    async def test_guild_reputation_curve_and_levels(self) -> None:
+        from bot.services.guild import GuildProgressService
+
+        svc = GuildProgressService(self.db, self.registry, self.settings, self.bus, self.cooldowns, economy=self.economy)
+        await svc.on_start()
+        self.assertEqual(svc.reputation_level(0), 0)
+        self.assertEqual(svc.reputation_level(99), 0)
+        self.assertEqual(svc.reputation_level(100), 1)
+        self.assertEqual(svc.reputation_level(399), 1)
+        self.assertEqual(svc.reputation_level(400), 2)
+        total = await svc.add_reputation(555, 150)
+        self.assertEqual(total, 150)
+        state = await svc.state(555)
+        self.assertEqual(state["reputation"], 150)
+
+    async def test_relic_weekly_lock_and_validation(self) -> None:
+        from bot.services.guild import GuildProgressService
+
+        svc = GuildProgressService(self.db, self.registry, self.settings, self.bus, self.cooldowns, economy=self.economy)
+        spec = await svc.set_relic(556, "phoenix")
+        self.assertEqual(spec.key, "phoenix")
+        with self.assertRaises(Exception):  # locked for the week
+            await svc.set_relic(556, "greed_idol")
+        with self.assertRaises(Exception):  # already active
+            await svc.set_relic(556, "phoenix")
+        with self.assertRaises(Exception):  # unknown
+            await svc.set_relic(556, "not_a_relic")
+        self.assertEqual((await svc.get_relic(556)).key, "phoenix")
+
+    async def test_expedition_completes_and_pays_contributors(self) -> None:
+        from bot.services.guild import GuildProgressService
+
+        svc = GuildProgressService(self.db, self.registry, self.settings, self.bus, self.cooldowns, economy=self.economy)
+        status = await svc.expedition_status(557)
+        spec = status.spec
+        assert spec is not None
+        self.assertIn(spec.metric, ("hunts", "pulls", "coins"))
+        # feed every metric far past any target in one bulk call
+        await svc.record(557, 77, hunts=400, pulls=400, coins=2_000_000)
+        final = await svc.expedition_status(557)
+        self.assertTrue(final.done)
+        self.assertEqual(final.milestones_hit[-1], 1.0)
+        balance = await self.economy.balance(557, 77)
+        self.assertGreaterEqual(balance, self.registry.expedition_completion_coins)
+        audited = await self.db.fetch_val(
+            "SELECT COUNT(*) FROM economy_log WHERE user_id = :u AND reason LIKE 'expedition:%'",
+            {"u": 77},
+        )
+        self.assertEqual(int(audited or 0), 1)
+        # extra play after completion does not double-pay or re-trigger
+        await svc.record_hunt(557, 77, coins=100)
+        audited2 = await self.db.fetch_val(
+            "SELECT COUNT(*) FROM economy_log WHERE user_id = :u AND reason LIKE 'expedition:%'",
+            {"u": 77},
+        )
+        self.assertEqual(int(audited2 or 0), 1)
+
     async def test_hunt_roundtrip(self) -> None:
         from bot.models.player import StatProfile
 

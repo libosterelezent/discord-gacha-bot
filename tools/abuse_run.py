@@ -363,6 +363,17 @@ async def main() -> int:
     check("unanswered encounter still spends the cooldown", has(sim, "slow down"))
     bot.content._encounter_chance = 0.0
 
+    # ------------------------------------------------------------------ guild abuse
+    print("[guild abuse]")
+    await sim.send_dm(PLAYER_ID, "player", "!guild")
+    check("guild command blocked in DM", has(sim, "server") or has(sim, "error"))
+    await sim.send(PLAYER_ID, "player", "!relic set")
+    check("relic set missing key prompts", has(sim, "missing argument"))
+    await sim.send(PLAYER_ID, "player", "!relic set " + "x" * 300)
+    check("oversized relic key clipped/unknown", has(sim, "unknown relic"))
+    await sim.send(PLAYER_ID, "player", "!expedition")
+    check("expedition renders", "expedition" in sim.http.last_text().lower() or "milestone" in sim.http.last_text().lower())
+
     # ------------------------------------------------------------------ misc
     print("[misc]")
     n_sent = len(sim.http.sent)
