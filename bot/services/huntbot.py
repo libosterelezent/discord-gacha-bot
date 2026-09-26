@@ -14,7 +14,6 @@ All tuning (costs, tick length, battery, income) lives in game.json.
 from __future__ import annotations
 
 import asyncio
-import json
 import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -71,10 +70,13 @@ _SQL_INSERT_EQUIPMENT = text(
     RETURNING id
     """
 )
+_SQL_INSERT_ITEM = text(
+    "INSERT INTO huntbot_items (guild_id, user_id, item_key) VALUES (:g, :u, :k)"
+)
 _SQL_TICK_UPDATE = text(
     """
     UPDATE huntbots
-    SET unclaimed_coins = unclaimed_coins + :c, unclaimed_items = :i,
+    SET unclaimed_coins = unclaimed_coins + :c,
         battery = MIN(battery + 1, :cap), last_tick = :t, hunts_done = hunts_done + 1
     WHERE guild_id = :g AND user_id = :u
     """
@@ -122,6 +124,10 @@ class HuntBotService(BaseService):
         )
         if row is None:
             return None
+        item_rows = await self.db.fetch_all(
+            "SELECT item_key FROM huntbot_items WHERE guild_id = :g AND user_id = :u",
+            {"g": guild_id, "u": user_id},
+        )
         return HuntBotState(
             user_id=user_id,
             guild_id=guild_id,
@@ -130,7 +136,7 @@ class HuntBotService(BaseService):
             battery=row["battery"],
             last_tick=datetime.fromisoformat(row["last_tick"]) if row["last_tick"] else None,
             unclaimed_coins=row["unclaimed_coins"],
-            unclaimed_items=json.loads(row["unclaimed_items"] or "[]"),
+            unclaimed_items=[r["item_key"] for r in item_rows],
             hunts_done=row["hunts_done"],
         )
 
@@ -247,10 +253,14 @@ class HuntBotService(BaseService):
                 item.db_id = int(equip_id)
                 items.append(item)
             await conn.execute(
+                text("DELETE FROM huntbot_items WHERE guild_id = :g AND user_id = :u"),
+                {"g": player.guild_id, "u": player.user_id},
+            )
+            await conn.execute(
                 text(
                     """
                     UPDATE huntbots
-                    SET unclaimed_coins = 0, unclaimed_items = '', battery = 0,
+                    SET unclaimed_coins = 0, battery = 0,
                         last_tick = :t, hunts_done = hunts_done + :h
                     WHERE guild_id = :g AND user_id = :u
                     """
@@ -267,9 +277,9 @@ class HuntBotService(BaseService):
 
     # -- simulation --------------------------------------------------------------------
 
-    def _simulate_tick(self, state: HuntBotState) -> tuple[int, list[str]]:
+    def _simulate_tick_level(self, level: int) -> tuple[int, list[str]]:
         """Return (coins, item_keys) produced by one hunt cycle."""
-        coins = self.income_per_tick(state.level)
+        coins = self.income_per_tick(level)
         items: list[str] = []
         if self._rng.random() < self.settings.huntbot.item_drop_chance:
             templates = self.content.all_equipment()
@@ -277,25 +287,56 @@ class HuntBotService(BaseService):
         return coins, items
 
     async def _tick_user(self, guild_id: int, user_id: int, harvest_bonus: float) -> None:
-        state = await self.get_state(guild_id, user_id)
-        if state is None or not state.active:
-            return
-        if state.battery >= self.settings.huntbot.battery_capacity:
-            return  # battery full; owner must collect
+        """One hunt cycle, as a single read-modify-write transaction.
 
-        gained_coins, gained_items = self._simulate_tick(state)
-        gained_coins = int(gained_coins * (1 + harvest_bonus) * self.efficiency(state.level))
-        new_items = (state.unclaimed_items + gained_items)[: self.settings.huntbot.battery_capacity]
+        State is re-read *inside* the transaction so a concurrent
+        collect()/toggle() commits first and this tick simply operates on
+        the fresh values (or skips). Coins and items are relative
+        operations (increment / insert), so ticks cannot resurrect
+        collected rewards.
+        """
+        async with self.db.transaction() as conn:
+            row = (
+                await conn.execute(
+                    text("SELECT level, active, battery FROM huntbots WHERE guild_id = :g AND user_id = :u"),
+                    {"g": guild_id, "u": user_id},
+                )
+            ).mappings().first()
+            if row is None or not row["active"]:
+                return
+            if row["battery"] >= self.settings.huntbot.battery_capacity:
+                return  # battery full; owner must collect
 
-        await self.db.execute(
-            _SQL_TICK_UPDATE,
-            {
-                "c": gained_coins, "i": json.dumps(new_items),
-                "cap": self.settings.huntbot.battery_capacity,
-                "t": _now_iso(), "g": guild_id, "u": user_id,
-            },
-        )
+            gained_coins, gained_items = self._simulate_tick_level(int(row["level"]))
+            gained_coins = int(gained_coins * (1 + harvest_bonus) * self.efficiency(int(row["level"])))
+
+            await conn.execute(
+                _SQL_TICK_UPDATE,
+                {
+                    "c": gained_coins, "cap": self.settings.huntbot.battery_capacity,
+                    "t": _now_iso(), "g": guild_id, "u": user_id,
+                },
+            )
+            # cap banked items at battery capacity, mirroring coin banking
+            capacity = self.settings.huntbot.battery_capacity
+            banked = (
+                await conn.execute(
+                    text("SELECT COUNT(*) FROM huntbot_items WHERE guild_id = :g AND user_id = :u"),
+                    {"g": guild_id, "u": user_id},
+                )
+            ).scalar_one()
+            for key in gained_items[: max(0, capacity - int(banked))]:
+                await conn.execute(_SQL_INSERT_ITEM, {"g": guild_id, "u": user_id, "k": key})
         self.log.debug("huntbot tick user=%s +%d coins %d items", user_id, gained_coins, len(gained_items))
+
+    def _simulate_tick_level(self, level: int) -> tuple[int, list[str]]:
+        """Return (coins, item_keys) produced by one hunt cycle."""
+        coins = self.income_per_tick(level)
+        items: list[str] = []
+        if self._rng.random() < self.settings.huntbot.item_drop_chance:
+            templates = self.content.all_equipment()
+            items.append(self._rng.choice(templates).key)
+        return coins, items
 
     async def _reconcile_offline(self) -> None:
         """Credit progress for bots that ticked while the process was down."""
@@ -316,16 +357,11 @@ class HuntBotService(BaseService):
                 continue
             capacity_left = max(0, self.settings.huntbot.battery_capacity - row["battery"])
             credited = min(ticks, capacity_left)
-            state = HuntBotState(
-                user_id=user_id, guild_id=guild_id, level=row["level"], active=True,
-                battery=row["battery"], last_tick=last,
-                unclaimed_coins=row["unclaimed_coins"], unclaimed_items=[],
-                hunts_done=row["hunts_done"],
-            )
+            level = int(row["level"])
             coins, items = 0, []
             for _ in range(credited):
-                c, i = self._simulate_tick(state)
-                coins += int(c * self.efficiency(state.level))
+                c, i = self._simulate_tick_level(level)
+                coins += int(c * self.efficiency(level))
                 items.extend(i)
             items = items[:capacity_left]
             new_battery = row["battery"] + credited
@@ -334,17 +370,19 @@ class HuntBotService(BaseService):
                 text(
                     """
                     UPDATE huntbots
-                    SET unclaimed_coins = unclaimed_coins + :c, unclaimed_items = :i,
+                    SET unclaimed_coins = unclaimed_coins + :c,
                         battery = :b, last_tick = :t, hunts_done = hunts_done + :h
                     WHERE guild_id = :g AND user_id = :u
                     """
                 ),
                 {
-                    "c": coins, "i": json.dumps(list(dict.fromkeys(items))), "b": new_battery,
+                    "c": coins, "b": new_battery,
                     "t": datetime.fromtimestamp(advanced, tz=timezone.utc).isoformat(),
                     "h": credited, "g": guild_id, "u": user_id,
                 },
             )
+            for key in items:
+                await self.db.execute(_SQL_INSERT_ITEM, {"g": guild_id, "u": user_id, "k": key})
             if credited:
                 self.log.info(
                     "offline reconcile user=%s credited %d ticks (+%d coins)",
