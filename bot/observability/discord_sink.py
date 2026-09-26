@@ -186,5 +186,5 @@ class DiscordSink:
             await channel.send(embed=embed)
         except discord.Forbidden:
             logger.warning("Missing permissions to log into channel %d", channel_id)
-        except discord.HTTPException as exc:
-            logger.warning("Failed to log into channel %d: %s", channel_id, exc)
+        # other HTTPExceptions (incl. 429s) propagate to the OutboundLimiter,
+        # which retries rate limits and drops hard failures
