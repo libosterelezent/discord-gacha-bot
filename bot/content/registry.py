@@ -157,8 +157,12 @@ class ContentRegistry:
     @classmethod
     def load(cls, directory: Path = CONTENT_DIR, spawn_algorithm: str = "weighted_luck") -> "ContentRegistry":
         rarities_raw = _read_json(directory / "rarities.json")
+        if not rarities_raw:
+            raise ValueError(f"{directory / 'rarities.json'} contains no rarity tiers")
         rarities: dict[str, RarityTier] = {}
         for entry in rarities_raw:
+            if entry["key"] in rarities:
+                raise ValueError(f"duplicate rarity key '{entry['key']}' in rarities.json")
             lo, hi = entry["value_range"]
             rarities[entry["key"]] = RarityTier(
                 key=entry["key"],
@@ -174,6 +178,10 @@ class ContentRegistry:
 
         cards: dict[str, GachaCard] = {}
         for entry in _read_json(directory / "cards.json"):
+            if entry["rarity"] not in rarities:
+                raise ValueError(
+                    f"card '{entry['key']}' references unknown rarity '{entry['rarity']}'"
+                )
             cards[entry["key"]] = GachaCard(
                 key=entry["key"],
                 name=entry["name"],
@@ -184,6 +192,10 @@ class ContentRegistry:
 
         equipment: dict[str, EquipmentTemplate] = {}
         for entry in _read_json(directory / "equipment.json"):
+            if entry.get("min_rarity", "common") not in rarities:
+                raise ValueError(
+                    f"equipment '{entry['key']}' references unknown min_rarity '{entry.get('min_rarity')}'"
+                )
             equipment[entry["key"]] = EquipmentTemplate(
                 key=entry["key"],
                 name=entry["name"],
@@ -196,6 +208,10 @@ class ContentRegistry:
 
         enemies: dict[str, HuntEnemy] = {}
         for entry in _read_json(directory / "enemies.json"):
+            if entry["rarity"] not in rarities:
+                raise ValueError(
+                    f"enemy '{entry['key']}' references unknown rarity '{entry['rarity']}'"
+                )
             enemies[entry["key"]] = HuntEnemy(
                 key=entry["key"],
                 name=entry["name"],
