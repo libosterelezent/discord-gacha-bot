@@ -67,6 +67,12 @@ _SQL_ADD_BALANCE = text(
     WHERE guild_id = :g AND user_id = :u
     """
 )
+_SQL_SUBTRACT_BALANCE_GUARDED = text(
+    """
+    UPDATE players SET balance = balance - :d, updated_at = :t
+    WHERE guild_id = :g AND user_id = :u AND balance >= :d
+    """
+)
 _SQL_SELECT_BALANCE = text(
     "SELECT balance FROM players WHERE guild_id = :g AND user_id = :u"
 )
@@ -189,13 +195,31 @@ class EconomyService(BaseService):
         await self.ensure_player(guild_id, recipient_id)
         now = _now_iso()
         async with self.db.transaction() as conn:
-            await conn.execute(_SQL_ADD_BALANCE, {"g": scope, "u": sender.user_id, "d": -amount, "t": now})
-            await conn.execute(_SQL_ADD_BALANCE, {"g": scope, "u": recipient_id, "d": amount, "t": now})
+            # guarded subtraction: the balance check races no concurrent spend
+            result = await conn.execute(
+                _SQL_SUBTRACT_BALANCE_GUARDED,
+                {"g": scope, "u": sender.user_id, "d": amount, "t": now},
+            )
+            if result.rowcount == 0:
+                raise InsufficientFundsError(amount, sender.balance)
+            await conn.execute(
+                _SQL_ADD_BALANCE, {"g": scope, "u": recipient_id, "d": amount, "t": now}
+            )
+            sender_balance = (
+                await conn.execute(_SQL_SELECT_BALANCE, {"g": scope, "u": sender.user_id})
+            ).scalar_one()
+            recipient_balance = (
+                await conn.execute(_SQL_SELECT_BALANCE, {"g": scope, "u": recipient_id})
+            ).scalar_one()
             await conn.execute(
                 _SQL_INSERT_ECO_LOG,
-                {"g": scope, "u": sender.user_id, "d": -amount, "r": f"transfer->{recipient_id}", "b": sender.balance - amount, "t": now},
+                {"g": scope, "u": sender.user_id, "d": -amount, "r": f"transfer->{recipient_id}", "b": int(sender_balance), "t": now},
             )
-        sender.balance -= amount
+            await conn.execute(
+                _SQL_INSERT_ECO_LOG,
+                {"g": scope, "u": recipient_id, "d": amount, "r": f"transfer<-{sender.user_id}", "b": int(recipient_balance), "t": now},
+            )
+        sender.balance = int(sender_balance)
         await self._publish(
             "economy", "transfer", guild_id, sender.user_id,
             f"sent {amount:,} to <@{recipient_id}>", recipient=recipient_id, amount=amount,

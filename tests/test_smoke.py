@@ -128,6 +128,23 @@ class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
         keys = [spec.key for spec, _ in held]
         self.assertEqual(keys.count("veteran"), 1)
 
+    async def test_transfer_concurrent_cannot_double_spend(self) -> None:
+        sender = await self.economy.ensure_player(self.GUILD, self.USER)
+        await self.economy.deposit(self.GUILD, self.USER, 1_000, "test")
+        sender = await self.economy.ensure_player(self.GUILD, self.USER)
+        start = sender.balance
+        results = await asyncio.gather(
+            self.economy.transfer(self.GUILD, sender, 300, 1_000),
+            self.economy.transfer(self.GUILD, sender, 1_000, 1_001),
+            return_exceptions=True,
+        )
+        failures = [r for r in results if isinstance(r, Exception)]
+        self.assertEqual(len(failures), 1, f"expected exactly one failure, got {results}")
+        final = await self.economy.balance(self.GUILD, self.USER)
+        self.assertGreaterEqual(final, 0)
+        # exactly one amount left the account
+        self.assertIn(final, (start - 1_000, start - 300))
+
     async def test_cooldowns_persist_across_manager_restarts(self) -> None:
         from bot.config import SETTINGS
 
