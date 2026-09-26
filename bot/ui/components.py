@@ -138,11 +138,14 @@ def hunt_view(
         lines.append(f"Scavenged {money_emoji} **{result.coins:,}** \u00b7 +{result.xp} XP")
     lines.append(f"-# your power **{result.power:,}** vs enemy **{result.enemy_power:,}**")
     body = "\n".join(lines)
+    footer = Theme.footer()
+    if result.modifier is not None:
+        footer = f"Today: {result.modifier.emoji} {result.modifier.name} — {result.modifier.description}"
     return card_view(
         f"## \U0001f3af The Hunt \u2014 {result.enemy.name}",
         body,
         accent=result.enemy.rarity.colour,
-        footer=Theme.footer(),
+        footer=footer,
     )
 
 

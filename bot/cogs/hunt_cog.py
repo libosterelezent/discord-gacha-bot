@@ -72,6 +72,13 @@ class HuntCog(GameMixin):
 
     @commands.hybrid_command(name="hunt_info", description="How hunting works.")
     async def hunt_info(self, ctx: commands.Context) -> None:
+        modifier = self.bot.hunt.todays_modifier()
+        modifier_line = ""
+        if modifier is not None:
+            modifier_line = (
+                f"\n\u2022 Today's modifier: **{modifier.emoji} {modifier.name}** "
+                f"\u2014 {modifier.description}\n"
+            )
         await ctx.reply(
             embed=Theme.embed(
                 "\U0001f3af Hunting Guide",
@@ -79,9 +86,11 @@ class HuntCog(GameMixin):
                     f"\u2022 `{ctx.clean_prefix}hunt` \u2014 fight a random enemy.\n"
                     f"\u2022 Stronger **equipment** and **upgrades** raise your power & luck.\n"
                     f"\u2022 Luck tilts enemy and loot rarity in your favour.\n"
+                    f"\u2022 Card **sets** add small XP/coin/luck bonuses.\n"
                     f"\u2022 Base cooldown: **{SETTINGS.cooldown_seconds('hunt'):.0f}s** "
                     f"(Swiftness upgrade reduces it).\n"
                     f"\u2022 XP levels you up; every level gives +1% coins."
+                    f"{modifier_line}"
                 ),
             ),
             mention_author=False,

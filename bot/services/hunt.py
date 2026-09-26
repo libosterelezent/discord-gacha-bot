@@ -27,7 +27,7 @@ from bot.services.base import BaseService
 
 if TYPE_CHECKING:
     from bot.config import GameSettings
-    from bot.content.registry import ContentRegistry
+    from bot.content.registry import ContentRegistry, HuntModifier
     from bot.core.cooldowns import CooldownManager
     from bot.core.database import Database
     from bot.core.events import EventBus
@@ -45,6 +45,7 @@ class HuntResult:
     drops: list[Equipment] = field(default_factory=list)
     card_key: str | None = None
     level_up: int | None = None
+    modifier: "HuntModifier | None" = None
 
     @property
     def headline(self) -> str:
@@ -77,9 +78,15 @@ class HuntService(BaseService):
     def _effective_cooldown(self, profile: StatProfile) -> float:
         return self.settings.cooldown_seconds("hunt") * profile.cooldown_multiplier
 
-    def _pick_enemy(self, profile: StatProfile) -> "HuntEnemy":
+    def todays_modifier(self):
+        """The daily hunt mutator (deterministic per UTC date)."""
+        from datetime import date
+
+        return self.content.modifier_for_date(date.today())
+
+    def _pick_enemy(self, profile: StatProfile, tier_bonus: int = 0) -> "HuntEnemy":
         """Rarity roll tilted by luck, capped by the player's power."""
-        cap_tier = 1 + profile.power // self.settings.hunt.tier_cap_divisor
+        cap_tier = 1 + profile.power // self.settings.hunt.tier_cap_divisor + tier_bonus
         cap = self.content.tier_at_most(cap_tier)
         candidates = [r for r in self.content.rarities if r.tier <= cap.tier]
         weights = [r.weight for r in candidates]
@@ -94,10 +101,10 @@ class HuntService(BaseService):
     def _enemy_power(self, enemy: "HuntEnemy") -> int:
         return 25 * enemy.rarity.tier ** 2  # 25..900 for tiers 1..6
 
-    def _roll_equipment_drop(self, enemy: "HuntEnemy", profile: StatProfile) -> Equipment | None:
+    def _roll_equipment_drop(self, enemy: "HuntEnemy", profile: StatProfile, drop_mult: float = 1.0) -> Equipment | None:
         hunt = self.settings.hunt
         base = hunt.equipment_drop_base + hunt.equipment_drop_per_tier * enemy.rarity.tier
-        if self._rng.random() > base + profile.luck * hunt.equipment_drop_luck_scale:
+        if self._rng.random() > min(0.9, (base + profile.luck * hunt.equipment_drop_luck_scale) * drop_mult):
             return None
         templates = self.content.equipment_by_rarity(enemy.rarity)
         if not templates:
@@ -129,7 +136,16 @@ class HuntService(BaseService):
             raise
 
     async def _hunt_locked(self, guild_id: int | None, player: Player, profile: StatProfile) -> HuntResult:
-        enemy = self._pick_enemy(profile)
+        modifier = self.todays_modifier()
+        if modifier is not None:
+            # apply the daily luck scaling to a copy of the profile
+            import dataclasses
+
+            profile = dataclasses.replace(
+                profile, luck=min(profile.luck * modifier.luck_scale, 1.5)
+            )
+
+        enemy = self._pick_enemy(profile, tier_bonus=modifier.tier_bonus if modifier else 0)
         e_power = self._enemy_power(enemy)
 
         # Success chance: sigmoid-ish mapping of power difference + luck.
@@ -146,12 +162,19 @@ class HuntService(BaseService):
             variance = self._rng.uniform(0.85, 1.2)
             coin_reward = int(enemy.base_coins * variance * profile.coin_multiplier)
             xp_reward = int(enemy.base_xp * self._rng.uniform(0.9, 1.15) * profile.xp_multiplier)
-            if (drop := self._roll_equipment_drop(enemy, profile)) is not None:
+            drop = self._roll_equipment_drop(
+                enemy, profile, drop_mult=modifier.drop_mult if modifier else 1.0
+            )
+            if drop is not None:
                 drops.append(drop)
             card_key = self._roll_card_drop(enemy, profile)
         else:
             coin_reward = int(enemy.base_coins * 0.2 * profile.coin_multiplier)
             xp_reward = max(1, int(enemy.base_xp * 0.25))
+
+        if modifier is not None:
+            coin_reward = int(coin_reward * modifier.coin_mult)
+            xp_reward = max(1, int(xp_reward * modifier.xp_mult))
 
         # persist rewards
         await self.economy._apply_delta(guild_id, player.user_id, coin_reward, f"hunt:{enemy.key}")
@@ -180,7 +203,7 @@ class HuntService(BaseService):
         result = HuntResult(
             enemy=enemy, success=success, coins=coin_reward, xp=xp_reward,
             power=profile.power, enemy_power=e_power, drops=drops,
-            card_key=card_key, level_up=level_up,
+            card_key=card_key, level_up=level_up, modifier=modifier,
         )
         self.log.info(
             "user=%s hunt %s enemy=%s coins=%+d xp=%+d drops=%d",

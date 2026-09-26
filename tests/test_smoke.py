@@ -72,6 +72,18 @@ class RegistryTest(unittest.TestCase):
         self.assertAlmostEqual(full.get("luck_pct", 0.0), 0.01)
         self.assertIn("Court Whisperer", titles2)
 
+    def test_hunt_modifier_pool_deterministic_per_date(self) -> None:
+        from datetime import date
+
+        pool = self.registry.all_modifiers()
+        self.assertGreater(len(pool), 4)
+        today = date(2026, 9, 26)
+        first = self.registry.modifier_for_date(today)
+        self.assertIs(first, self.registry.modifier_for_date(today))  # same object: deterministic
+        # rotation actually varies across dates (sample a week)
+        picks = {self.registry.modifier_for_date(date(2026, 9, d)).key for d in range(20, 27)}
+        self.assertGreater(len(picks), 1)
+
     def test_stat_profile_applies_set_bonuses(self) -> None:
         from bot.models.player import Player, StatProfile
 

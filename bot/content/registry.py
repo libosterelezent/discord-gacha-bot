@@ -78,6 +78,21 @@ class BadgeSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class HuntModifier:
+    """A daily hunt modifier: small, transparent, rotating mutators."""
+
+    key: str
+    name: str
+    emoji: str
+    description: str
+    coin_mult: float = 1.0
+    xp_mult: float = 1.0
+    tier_bonus: int = 0
+    drop_mult: float = 1.0
+    luck_scale: float = 1.0
+
+
+@dataclass(frozen=True, slots=True)
 class SetTier:
     size: int
     bonus: dict[str, float]  # xp_pct / coin_pct / luck_pct
@@ -171,6 +186,7 @@ class ContentRegistry:
         badges: dict[str, BadgeSpec],
         spawn_algorithm: str = "weighted_luck",
         sets: dict[str, CardSet] | None = None,
+        modifiers: list[HuntModifier] | None = None,
     ) -> None:
         self._rarities = rarities
         self._tier_order = sorted(rarities.values(), key=lambda r: r.tier)
@@ -181,6 +197,7 @@ class ContentRegistry:
         self._badges = badges
         self._spawn_algorithm = spawn_algorithm
         self._sets = sets or {}
+        self._modifiers = tuple(modifiers or ())
         self._build_indexes()
 
     def _build_indexes(self) -> None:
@@ -310,7 +327,24 @@ class ContentRegistry:
                 tiers=tiers,
             )
 
-        return cls(rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm, sets)
+        modifiers: list[HuntModifier] = []
+        for entry in _read_json(directory / "hunt_modifiers.json"):
+            effects = entry.get("effects", {})
+            modifiers.append(
+                HuntModifier(
+                    key=entry["key"],
+                    name=entry["name"],
+                    emoji=entry["emoji"],
+                    description=entry.get("description", ""),
+                    coin_mult=float(effects.get("coin_mult", 1.0)),
+                    xp_mult=float(effects.get("xp_mult", 1.0)),
+                    tier_bonus=int(effects.get("tier_bonus", 0)),
+                    drop_mult=float(effects.get("drop_mult", 1.0)),
+                    luck_scale=float(effects.get("luck_scale", 1.0)),
+                )
+            )
+
+        return cls(rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm, sets, modifiers)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -329,6 +363,7 @@ class ContentRegistry:
         self._upgrades = other._upgrades
         self._badges = other._badges
         self._sets = other._sets
+        self._modifiers = other._modifiers
         self._spawn_algorithm = other._spawn_algorithm
         self._build_indexes()
 
@@ -468,6 +503,16 @@ class ContentRegistry:
             (card_set, *card_set.progress(owned_keys), card_set.tiers_completed(owned_keys))
             for card_set in self._sets.values()
         ]
+
+    def all_modifiers(self) -> list[HuntModifier]:
+        return list(self._modifiers)
+
+    def modifier_for_date(self, day) -> HuntModifier | None:
+        """Deterministic pick from the pool for a given date (rotation)."""
+        if not self._modifiers:
+            return None
+        rng = random.Random(f"modifier:{day.isoformat()}")
+        return rng.choice(self._modifiers)
 
     def set_bonuses(self, owned_keys: set[str] | frozenset[str]) -> tuple[dict[str, float], list[str]]:
         """Aggregated active set bonuses and earned titles for an owner."""
