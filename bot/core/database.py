@@ -21,9 +21,9 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Final, Mapping, Sequence
+from typing import Any, AsyncIterator, Callable, Final, Mapping
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
@@ -31,7 +31,7 @@ from bot.core.exceptions import DatabaseError
 
 logger = logging.getLogger("gacha.database")
 
-SCHEMA_VERSION: int = 2
+SCHEMA_VERSION: int = 3
 
 
 def _ddl(dialect: str) -> str:
@@ -114,11 +114,26 @@ def _ddl(dialect: str) -> str:
     CREATE TABLE IF NOT EXISTS badges (
         user_id    BIGINT NOT NULL,
         badge_key  TEXT NOT NULL,
-        guild_id   BIGINT,             -- NULL => globally-awarded badge
+        guild_id   BIGINT NOT NULL DEFAULT 0,  -- 0 => globally-awarded badge
         granted_at TEXT NOT NULL,
         granted_by BIGINT,
         PRIMARY KEY (user_id, badge_key, guild_id)
     );
+
+    CREATE TABLE IF NOT EXISTS cooldowns (
+        guild_id   BIGINT NOT NULL,
+        user_id    BIGINT NOT NULL,
+        action     TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        PRIMARY KEY (guild_id, user_id, action)
+    );
+
+    CREATE TABLE IF NOT EXISTS huntbot_items (
+        guild_id BIGINT NOT NULL,
+        user_id  BIGINT NOT NULL,
+        item_key TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_huntbot_items_owner ON huntbot_items(guild_id, user_id);
 
     CREATE TABLE IF NOT EXISTS economy_log (
         id            {auto_id},
@@ -146,6 +161,65 @@ async def _migration_v2(conn: AsyncConnection, dialect: str) -> None:
         await conn.execute(text(statement))
 
 
+async def _migration_v3(conn: AsyncConnection, dialect: str) -> None:
+    """Version 3 — persistent cooldowns, normalized huntbot items, badge sentinel.
+
+    * ``cooldowns`` backs the persistent CooldownManager (fixed cooldowns
+      survive restarts instead of resetting).
+    * ``huntbot_items`` replaces the JSON blob column so ticking and
+      collecting are race-free relative operations.
+    * global badges move from ``guild_id IS NULL`` to the sentinel ``0`` —
+      NULLs never conflict in unique constraints, so re-granting a global
+      badge used to duplicate rows.
+    """
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS cooldowns (
+                guild_id   BIGINT NOT NULL,
+                user_id    BIGINT NOT NULL,
+                action     TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id, action)
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS huntbot_items (
+                guild_id BIGINT NOT NULL,
+                user_id  BIGINT NOT NULL,
+                item_key TEXT NOT NULL
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS idx_huntbot_items_owner ON huntbot_items(guild_id, user_id)")
+    )
+    await conn.execute(text("UPDATE badges SET guild_id = 0 WHERE guild_id IS NULL"))
+    # migrate legacy JSON item blobs into normalized rows
+    rows = (
+        await conn.execute(
+            text("SELECT guild_id, user_id, unclaimed_items FROM huntbots WHERE unclaimed_items != ''")
+        )
+    ).mappings().all()
+    import json as _json
+
+    for row in rows:
+        try:
+            keys = _json.loads(row["unclaimed_items"] or "[]")
+        except ValueError:
+            keys = []
+        for key in keys:
+            await conn.execute(
+                text("INSERT INTO huntbot_items (guild_id, user_id, item_key) VALUES (:g, :u, :k)"),
+                {"g": row["guild_id"], "u": row["user_id"], "k": key},
+            )
+
+
 def _ddl_statements(script: str) -> list[str]:
     """Split a DDL script into individual statements (comments stripped)."""
     statements: list[str] = []
@@ -160,6 +234,7 @@ def _ddl_statements(script: str) -> list[str]:
 
 MIGRATIONS: Final[tuple[tuple[int, Callable[[AsyncConnection, str], Any]], ...]] = (
     (2, _migration_v2),
+    (3, _migration_v3),
 )
 
 Row = Mapping[str, Any]
@@ -191,7 +266,9 @@ class Database:
             if db_path and db_path != ":memory:":
                 Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._engine = create_async_engine(self._url, pool_pre_ping=True)
+            self._engine = create_async_engine(self._url, pool_pre_ping=not self._url.startswith("sqlite"))
+            if self._url.startswith("sqlite"):
+                self._install_sqlite_pragmas(self._engine)
             async with self._engine.begin() as conn:
                 await self._migrate(conn)
             self._ready = True
@@ -199,6 +276,20 @@ class Database:
         except Exception as exc:
             logger.exception("Failed to connect/migrate database")
             raise DatabaseError("Database initialisation failed.", original=exc) from exc
+
+    @staticmethod
+    def _install_sqlite_pragmas(engine: AsyncEngine) -> None:
+        """WAL + busy timeout: concurrent readers don't block the writer and
+        lock contention retries instead of erroring."""
+        @event.listens_for(engine.sync_engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, _record) -> None:  # type: ignore[no-untyped-def]
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=5000")
+                cursor.execute("PRAGMA foreign_keys=ON")
+            finally:
+                cursor.close()
 
     async def close(self) -> None:
         if self._engine is not None:
@@ -241,45 +332,39 @@ class Database:
     # -- convenience query helpers ----------------------------------------------
 
     @staticmethod
-    def _params(params: Sequence[Any] | Mapping[str, Any]) -> Mapping[str, Any]:
-        if isinstance(params, Mapping):
-            return params
-        return dict(enumerate(params))  # positional binds are not used by this codebase
-
-    @staticmethod
     def _statement(sql: "str | TextClause") -> TextClause:
         return sql if isinstance(sql, TextClause) else text(sql)
 
-    async def execute(self, sql: "str | TextClause", params: Mapping[str, Any] | Sequence[Any] = ()) -> int:
+    async def execute(self, sql: "str | TextClause", params: Mapping[str, Any] = ()) -> int:
         """Run a single statement in its own transaction; return rowcount."""
         async with self.transaction() as conn:
-            result = await conn.execute(self._statement(sql), self._params(params))
+            result = await conn.execute(self._statement(sql), params)
             return result.rowcount
 
-    async def insert_returning_id(self, sql: "str | TextClause", params: Mapping[str, Any] | Sequence[Any] = ()) -> int:
+    async def insert_returning_id(self, sql: "str | TextClause", params: Mapping[str, Any] = ()) -> int:
         """INSERT with ``RETURNING id`` (supported by both backends)."""
         async with self.transaction() as conn:
-            result = await conn.execute(self._statement(sql), self._params(params))
+            result = await conn.execute(self._statement(sql), params)
             return int(result.scalar_one())
 
-    async def fetch_one(self, sql: "str | TextClause", params: Mapping[str, Any] | Sequence[Any] = ()) -> Row | None:
+    async def fetch_one(self, sql: "str | TextClause", params: Mapping[str, Any] = ()) -> Row | None:
         if self._engine is None:
             raise DatabaseError("Database not connected.")
         async with self._engine.connect() as conn:
-            result = await conn.execute(self._statement(sql), self._params(params))
+            result = await conn.execute(self._statement(sql), params)
             row = result.mappings().first()
             return dict(row) if row is not None else None
 
-    async def fetch_all(self, sql: "str | TextClause", params: Mapping[str, Any] | Sequence[Any] = ()) -> list[Row]:
+    async def fetch_all(self, sql: "str | TextClause", params: Mapping[str, Any] = ()) -> list[Row]:
         if self._engine is None:
             raise DatabaseError("Database not connected.")
         async with self._engine.connect() as conn:
-            result = await conn.execute(self._statement(sql), self._params(params))
+            result = await conn.execute(self._statement(sql), params)
             return [dict(r) for r in result.mappings().all()]
 
-    async def fetch_val(self, sql: "str | TextClause", params: Mapping[str, Any] | Sequence[Any] = ()) -> Any:
+    async def fetch_val(self, sql: "str | TextClause", params: Mapping[str, Any] = ()) -> Any:
         if self._engine is None:
             raise DatabaseError("Database not connected.")
         async with self._engine.connect() as conn:
-            result = await conn.execute(self._statement(sql), self._params(params))
+            result = await conn.execute(self._statement(sql), params)
             return result.scalar()
