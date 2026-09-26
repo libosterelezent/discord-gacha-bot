@@ -23,6 +23,7 @@ from sqlalchemy import text
 from bot.core.decorators import timed
 from bot.core.events import GameEvent
 from bot.core.exceptions import GachaError, InsufficientFundsError
+from bot.core.util import SQL_INSERT_EQUIPMENT, SQL_UPSERT_INVENTORY, now_iso
 from bot.models.items import Equipment
 from bot.models.player import Player
 from bot.services.base import BaseService
@@ -74,19 +75,8 @@ class PullSession:
             self.best = outcome.rarity
 
 
-_SQL_UPSERT_INVENTORY = text(
-    """
-    INSERT INTO inventory (guild_id, user_id, item_key, quantity) VALUES (:g, :u, :k, 1)
-    ON CONFLICT (guild_id, user_id, item_key) DO UPDATE SET quantity = quantity + 1
-    """
-)
-_SQL_INSERT_EQUIPMENT = text(
-    """
-    INSERT INTO equipment (guild_id, user_id, item_key, slot, rarity, level, attack, defense, luck, obtained)
-    VALUES (:g, :u, :k, :s, :r, 0, :a, :d, :l, :t)
-    RETURNING id
-    """
-)
+_SQL_UPSERT_INVENTORY = SQL_UPSERT_INVENTORY
+_SQL_INSERT_EQUIPMENT = SQL_INSERT_EQUIPMENT
 _SQL_APPLY_PULL = text(
     """
     UPDATE players
@@ -191,9 +181,7 @@ class GachaService(BaseService):
         # modular sliding-window cooldown (maintainer-configurable)
         self.cooldowns.check_window(player.guild_id, player.user_id, "pull")
 
-        from datetime import datetime, timezone
-
-        now = datetime.now(timezone.utc).isoformat()
+        now = now_iso()
         owned = await self.owned_card_keys(player.guild_id, player.user_id)
         session = PullSession(cost=cost)
 
@@ -290,10 +278,6 @@ class GachaService(BaseService):
 
     async def sell_duplicates(self, guild_id: int | None, player: Player) -> int:
         """Convert spare copies (quantity > 1) into coins. Returns coins gained."""
-        from datetime import datetime, timezone
-
-        now = datetime.now(timezone.utc).isoformat()
-
         rows = await self.db.fetch_all(
             """
             SELECT item_key, quantity FROM inventory
@@ -302,7 +286,7 @@ class GachaService(BaseService):
             {"g": player.guild_id, "u": player.user_id},
         )
         total = 0
-        now = datetime.now(timezone.utc).isoformat()
+        now = now_iso()
         async with self.db.transaction() as conn:
             for row in rows:
                 card = self.content.card(row["item_key"])

@@ -12,13 +12,13 @@ Badges are declared in ``bot/content/data/badges.json`` with a scope:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 
 from bot.core.events import GameEvent
 from bot.core.exceptions import GachaBotError
+from bot.core.util import now_iso
 from bot.services.base import BaseService
 from bot.services.economy import GLOBAL_GUILD_ID
 
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now_iso()
 
 
 _SQL_GRANT = text(

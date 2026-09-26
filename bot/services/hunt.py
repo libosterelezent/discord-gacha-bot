@@ -16,13 +16,11 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-
-from sqlalchemy import text
 
 from bot.core.decorators import timed
 from bot.core.events import GameEvent
+from bot.core.util import SQL_INSERT_EQUIPMENT, SQL_UPSERT_INVENTORY, now_iso
 from bot.models.items import Equipment
 from bot.models.player import Player, StatProfile
 from bot.services.base import BaseService
@@ -55,19 +53,8 @@ class HuntResult:
         return f"\U0001f480 **{self.enemy.name}** {self.enemy.rarity.emoji} fought back and you fled..."
 
 
-_SQL_INSERT_EQUIPMENT = text(
-    """
-    INSERT INTO equipment (guild_id, user_id, item_key, slot, rarity, level, attack, defense, luck, obtained)
-    VALUES (:g, :u, :k, :s, :r, 0, :a, :d, :l, :t)
-    RETURNING id
-    """
-)
-_SQL_UPSERT_INVENTORY = text(
-    """
-    INSERT INTO inventory (guild_id, user_id, item_key, quantity) VALUES (:g, :u, :k, 1)
-    ON CONFLICT (guild_id, user_id, item_key) DO UPDATE SET quantity = quantity + 1
-    """
-)
+_SQL_INSERT_EQUIPMENT = SQL_INSERT_EQUIPMENT
+_SQL_UPSERT_INVENTORY = SQL_UPSERT_INVENTORY
 
 
 class HuntService(BaseService):
@@ -158,7 +145,7 @@ class HuntService(BaseService):
         # persist rewards
         await self.economy._apply_delta(guild_id, player.user_id, coin_reward, f"hunt:{enemy.key}")
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = now_iso()
         async with self.db.transaction() as conn:
             for item in drops:
                 equip_id = (

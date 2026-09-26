@@ -14,3 +14,6 @@ logs/
 *.db
 *.db-wal
 *.db-shm
+
+# agent knowledge
+.knowledge/

@@ -9,7 +9,6 @@ everything onto the sentinel guild ``0`` via :func:`scope_id`.
 from __future__ import annotations
 
 import random
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import text
@@ -21,6 +20,13 @@ from bot.core.exceptions import (
     InsufficientFundsError,
     NegativeAmountError,
     PlayerNotFoundError,
+)
+from bot.core.util import (
+    SQL_ADD_BALANCE,
+    SQL_INSERT_ECO_LOG,
+    SQL_SELECT_BALANCE,
+    SQL_SUBTRACT_BALANCE_GUARDED,
+    now_iso,
 )
 from bot.models.player import Player
 from bot.services.base import BaseService
@@ -42,7 +48,7 @@ def scope_id(guild_id: int | None, settings: "GameSettings") -> int:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now_iso()
 
 
 # -- shared SQL fragments (named binds, portable across sqlite/postgres) --------
@@ -61,31 +67,17 @@ _SQL_UPSERT_GLOBAL_USER = text(
     ON CONFLICT (user_id) DO UPDATE SET last_seen = :t
     """
 )
-_SQL_ADD_BALANCE = text(
-    """
-    UPDATE players SET balance = balance + :d, updated_at = :t
-    WHERE guild_id = :g AND user_id = :u
-    """
-)
-_SQL_SUBTRACT_BALANCE_GUARDED = text(
-    """
-    UPDATE players SET balance = balance - :d, updated_at = :t
-    WHERE guild_id = :g AND user_id = :u AND balance >= :d
-    """
-)
-_SQL_SELECT_BALANCE = text(
-    "SELECT balance FROM players WHERE guild_id = :g AND user_id = :u"
-)
-_SQL_INSERT_ECO_LOG = text(
-    """
-    INSERT INTO economy_log (guild_id, user_id, delta, reason, balance_after, created_at)
-    VALUES (:g, :u, :d, :r, :b, :t)
-    """
-)
+_SQL_ADD_BALANCE = SQL_ADD_BALANCE
+_SQL_SUBTRACT_BALANCE_GUARDED = SQL_SUBTRACT_BALANCE_GUARDED
+_SQL_SELECT_BALANCE = SQL_SELECT_BALANCE
+_SQL_INSERT_ECO_LOG = SQL_INSERT_ECO_LOG
 
 
 class EconomyService(BaseService):
     log_name = "gacha.economy"
+
+    def _post_init(self) -> None:
+        self._rng = random.Random()
 
     async def on_start(self) -> None:
         self.log.info("Economy service ready (scope=%s)", self.settings.economy.scope)
@@ -239,7 +231,7 @@ class EconomyService(BaseService):
     @timed()
     async def work(self, guild_id: int | None, player: Player) -> int:
         self.cooldowns.check(player.guild_id, player.user_id, "work")
-        amount = random.randint(self.settings.economy.work_min, self.settings.economy.work_max)
+        amount = self._rng.randint(self.settings.economy.work_min, self.settings.economy.work_max)
         greed = self.content.upgrade("greed")
         profile_bonus = player.upgrades.get("greed", 0) * (greed.effect_per_level if greed else 0.0)
         amount = int(amount * (1 + profile_bonus))
@@ -256,7 +248,7 @@ class EconomyService(BaseService):
             raise NegativeAmountError()
         if player.balance < amount:
             raise InsufficientFundsError(amount, player.balance)
-        won = random.random() < 0.5
+        won = self._rng.random() < 0.5
         delta = amount if won else -amount
         await self._apply_delta(guild_id, player.user_id, delta, "gamble")
         await self._publish(

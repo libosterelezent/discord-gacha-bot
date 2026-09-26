@@ -5,13 +5,13 @@ every spec; adding a new upgrade is a JSON entry, nothing else.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable
 
 from sqlalchemy import text
 
 from bot.core.events import GameEvent
 from bot.core.exceptions import InsufficientFundsError, UpgradeError
+from bot.core.util import SQL_INSERT_ECO_LOG, SQL_SUBTRACT_BALANCE_GUARDED, now_iso
 from bot.models.player import Player
 from bot.services.base import BaseService
 
@@ -24,7 +24,11 @@ if TYPE_CHECKING:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now_iso()
+
+
+_SQL_SPEND = SQL_SUBTRACT_BALANCE_GUARDED
+_SQL_ECO_LOG = SQL_INSERT_ECO_LOG
 
 
 class UpgradeService(BaseService):
@@ -62,10 +66,11 @@ class UpgradeService(BaseService):
 
         now = _now_iso()
         async with self.db.transaction() as conn:
-            await conn.execute(
-                text("UPDATE players SET balance = balance - :c, updated_at = :t WHERE guild_id = :g AND user_id = :u"),
-                {"c": cost, "t": now, "g": player.guild_id, "u": player.user_id},
+            spend = await conn.execute(
+                _SQL_SPEND, {"d": cost, "t": now, "g": player.guild_id, "u": player.user_id}
             )
+            if spend.rowcount == 0:  # concurrent spend won the funds
+                raise InsufficientFundsError(cost, player.balance)
             await conn.execute(
                 text(
                     """
@@ -76,12 +81,7 @@ class UpgradeService(BaseService):
                 {"g": player.guild_id, "u": player.user_id, "k": key},
             )
             await conn.execute(
-                text(
-                    """
-                    INSERT INTO economy_log (guild_id, user_id, delta, reason, balance_after, created_at)
-                    VALUES (:g, :u, :d, :r, :b, :t)
-                    """
-                ),
+                _SQL_ECO_LOG,
                 {"g": player.guild_id, "u": player.user_id, "d": -cost, "r": f"upgrade:{key}", "b": player.balance - cost, "t": now},
             )
             new_level = current + 1

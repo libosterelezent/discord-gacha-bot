@@ -23,6 +23,12 @@ from sqlalchemy import text
 
 from bot.core.events import GameEvent
 from bot.core.exceptions import HuntBotError, InsufficientFundsError
+from bot.core.util import (
+    SQL_INSERT_ECO_LOG,
+    SQL_INSERT_EQUIPMENT,
+    SQL_SUBTRACT_BALANCE_GUARDED,
+    now_iso,
+)
 from bot.models.player import Player
 from bot.services.base import BaseService
 
@@ -35,7 +41,7 @@ if TYPE_CHECKING:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return now_iso()
 
 
 @dataclass(slots=True)
@@ -54,22 +60,9 @@ class HuntBotState:
 _SQL_INSERT_BOT = text(
     "INSERT INTO huntbots (guild_id, user_id, level, active, last_tick) VALUES (:g, :u, 1, 1, :t)"
 )
-_SQL_SPEND = text(
-    "UPDATE players SET balance = balance - :c, updated_at = :t WHERE guild_id = :g AND user_id = :u"
-)
-_SQL_ECO_LOG = text(
-    """
-    INSERT INTO economy_log (guild_id, user_id, delta, reason, balance_after, created_at)
-    VALUES (:g, :u, :d, :r, :b, :t)
-    """
-)
-_SQL_INSERT_EQUIPMENT = text(
-    """
-    INSERT INTO equipment (guild_id, user_id, item_key, slot, rarity, level, attack, defense, luck, obtained)
-    VALUES (:g, :u, :k, :s, :r, 0, :a, :d, :l, :t)
-    RETURNING id
-    """
-)
+_SQL_SPEND = SQL_SUBTRACT_BALANCE_GUARDED
+_SQL_ECO_LOG = SQL_INSERT_ECO_LOG
+_SQL_INSERT_EQUIPMENT = SQL_INSERT_EQUIPMENT
 _SQL_INSERT_ITEM = text(
     "INSERT INTO huntbot_items (guild_id, user_id, item_key) VALUES (:g, :u, :k)"
 )
@@ -162,7 +155,9 @@ class HuntBotService(BaseService):
             raise InsufficientFundsError(cost, player.balance)
         now = _now_iso()
         async with self.db.transaction() as conn:
-            await conn.execute(_SQL_SPEND, {"c": cost, "t": now, "g": player.guild_id, "u": player.user_id})
+            spend = await conn.execute(_SQL_SPEND, {"d": cost, "t": now, "g": player.guild_id, "u": player.user_id})
+            if spend.rowcount == 0:  # concurrent spend won the funds
+                raise InsufficientFundsError(cost, player.balance)
             await conn.execute(_SQL_INSERT_BOT, {"g": player.guild_id, "u": player.user_id, "t": now})
             await conn.execute(
                 _SQL_ECO_LOG,
@@ -183,7 +178,9 @@ class HuntBotService(BaseService):
             raise InsufficientFundsError(cost, player.balance)
         now = _now_iso()
         async with self.db.transaction() as conn:
-            await conn.execute(_SQL_SPEND, {"c": cost, "t": now, "g": player.guild_id, "u": player.user_id})
+            spend = await conn.execute(_SQL_SPEND, {"d": cost, "t": now, "g": player.guild_id, "u": player.user_id})
+            if spend.rowcount == 0:  # concurrent spend won the funds
+                raise InsufficientFundsError(cost, player.balance)
             await conn.execute(
                 text("UPDATE huntbots SET level = level + 1 WHERE guild_id = :g AND user_id = :u"),
                 {"g": player.guild_id, "u": player.user_id},
@@ -328,15 +325,6 @@ class HuntBotService(BaseService):
             for key in gained_items[: max(0, capacity - int(banked))]:
                 await conn.execute(_SQL_INSERT_ITEM, {"g": guild_id, "u": user_id, "k": key})
         self.log.debug("huntbot tick user=%s +%d coins %d items", user_id, gained_coins, len(gained_items))
-
-    def _simulate_tick_level(self, level: int) -> tuple[int, list[str]]:
-        """Return (coins, item_keys) produced by one hunt cycle."""
-        coins = self.income_per_tick(level)
-        items: list[str] = []
-        if self._rng.random() < self.settings.huntbot.item_drop_chance:
-            templates = self.content.all_equipment()
-            items.append(self._rng.choice(templates).key)
-        return coins, items
 
     async def _reconcile_offline(self) -> None:
         """Credit progress for bots that ticked while the process was down."""
