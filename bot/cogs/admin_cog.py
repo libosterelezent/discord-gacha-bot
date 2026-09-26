@@ -33,6 +33,7 @@ class AdminCog(GameMixin):
     @is_owner()
     @commands.guild_only()
     async def grant(self, ctx: commands.Context, member: discord.Member, amount: commands.Range[int, 1]) -> None:
+        await self.bot.economy.ensure_player(ctx.guild.id, member.id)
         new_balance = await self.bot.economy.deposit(
             ctx.guild.id, member.id, amount, reason=f"grant:{ctx.author.id}"
         )
