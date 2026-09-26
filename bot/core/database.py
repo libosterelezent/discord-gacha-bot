@@ -31,7 +31,7 @@ from bot.core.exceptions import DatabaseError
 
 logger = logging.getLogger("gacha.database")
 
-SCHEMA_VERSION: int = 4
+SCHEMA_VERSION: int = 5
 
 
 def _ddl(dialect: str) -> str:
@@ -145,6 +145,28 @@ def _ddl(dialect: str) -> str:
         created_at    TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_economy_log_owner ON economy_log(guild_id, user_id);
+
+    CREATE TABLE IF NOT EXISTS guild_state (
+        guild_id         BIGINT PRIMARY KEY,
+        reputation       BIGINT NOT NULL DEFAULT 0,
+        relic_key        TEXT NOT NULL DEFAULT '',
+        relic_set_at     TEXT,
+        expedition_week  TEXT NOT NULL DEFAULT '',
+        expedition_key   TEXT NOT NULL DEFAULT '',
+        expedition_progress BIGINT NOT NULL DEFAULT 0,
+        expedition_milestones TEXT NOT NULL DEFAULT '',
+        expedition_done  INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS guild_contributions (
+        guild_id BIGINT NOT NULL,
+        user_id  BIGINT NOT NULL,
+        week     TEXT NOT NULL,
+        hunts    INTEGER NOT NULL DEFAULT 0,
+        pulls    INTEGER NOT NULL DEFAULT 0,
+        coins    BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, user_id, week)
+    );
 
     CREATE TABLE IF NOT EXISTS records (
         guild_id BIGINT NOT NULL,
@@ -261,10 +283,41 @@ async def _migration_v4(conn: AsyncConnection, dialect: str) -> None:
     )
 
 
+async def _migration_v5(conn: AsyncConnection, dialect: str) -> None:
+    """Version 5 — guild layer: reputation, relics, weekly expeditions."""
+    for statement in _ddl_statements(
+        """
+        CREATE TABLE IF NOT EXISTS guild_state (
+            guild_id         BIGINT PRIMARY KEY,
+            reputation       BIGINT NOT NULL DEFAULT 0,
+            relic_key        TEXT NOT NULL DEFAULT '',
+            relic_set_at     TEXT,
+            expedition_week  TEXT NOT NULL DEFAULT '',
+            expedition_key   TEXT NOT NULL DEFAULT '',
+            expedition_progress BIGINT NOT NULL DEFAULT 0,
+            expedition_milestones TEXT NOT NULL DEFAULT '',
+            expedition_done  INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS guild_contributions (
+            guild_id BIGINT NOT NULL,
+            user_id  BIGINT NOT NULL,
+            week     TEXT NOT NULL,
+            hunts    INTEGER NOT NULL DEFAULT 0,
+            pulls    INTEGER NOT NULL DEFAULT 0,
+            coins    BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id, week)
+        );
+        """
+    ):
+        await conn.execute(text(statement))
+
+
 MIGRATIONS: Final[tuple[tuple[int, Callable[[AsyncConnection, str], Any]], ...]] = (
     (2, _migration_v2),
     (3, _migration_v3),
     (4, _migration_v4),
+    (5, _migration_v5),
 )
 
 Row = Mapping[str, Any]
@@ -318,6 +371,9 @@ class Database:
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA busy_timeout=5000")
                 cursor.execute("PRAGMA foreign_keys=ON")
+                # WAL + NORMAL: no per-commit fsync (safe against app crashes;
+                # OS/power loss may lose the last commits only)
+                cursor.execute("PRAGMA synchronous=NORMAL")
             finally:
                 cursor.close()
 
