@@ -128,6 +128,20 @@ class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
         keys = [spec.key for spec, _ in held]
         self.assertEqual(keys.count("veteran"), 1)
 
+    async def test_cooldowns_persist_across_manager_restarts(self) -> None:
+        from bot.config import SETTINGS
+
+        persistent = CooldownManager(SETTINGS, self.db)
+        await persistent.load()
+        await persistent.trigger(self.GUILD, self.USER, "daily")
+        self.assertGreater(persistent.remaining(self.GUILD, self.USER, "daily"), 0)
+
+        reborn = CooldownManager(SETTINGS, self.db)
+        await reborn.load()
+        self.assertGreater(reborn.remaining(self.GUILD, self.USER, "daily"), 0)
+        with self.assertRaises(Exception):
+            reborn.check(self.GUILD, self.USER, "daily")
+
     async def test_huntbot_buy_and_collect(self) -> None:
         player = await self.economy.ensure_player(self.GUILD, self.USER)
         await self.economy.deposit(self.GUILD, self.USER, 50_000, "test")

@@ -177,7 +177,7 @@ class HuntService(BaseService):
                     _SQL_UPSERT_INVENTORY, {"g": player.guild_id, "u": player.user_id, "k": card_key}
                 )
 
-        self.cooldowns.trigger(
+        await self.cooldowns.trigger(
             player.guild_id, player.user_id, "hunt", scale=profile.cooldown_multiplier
         )
         level_up = await self.economy.add_xp_and_level(player, xp_reward)

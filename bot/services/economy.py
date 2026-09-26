@@ -208,7 +208,7 @@ class EconomyService(BaseService):
         self.cooldowns.check(player.guild_id, player.user_id, "daily")
         reward = self.settings.economy.daily_reward + player.level * self.settings.economy.daily_level_bonus
         await self._apply_delta(guild_id, player.user_id, reward, "daily")
-        self.cooldowns.trigger(player.guild_id, player.user_id, "daily")
+        await self.cooldowns.trigger(player.guild_id, player.user_id, "daily")
         await self._publish("economy", "daily", guild_id, player.user_id, f"claimed daily +{reward:,}")
         return reward
 
@@ -220,7 +220,7 @@ class EconomyService(BaseService):
         profile_bonus = player.upgrades.get("greed", 0) * (greed.effect_per_level if greed else 0.0)
         amount = int(amount * (1 + profile_bonus))
         await self._apply_delta(guild_id, player.user_id, amount, "work")
-        self.cooldowns.trigger(player.guild_id, player.user_id, "work")
+        await self.cooldowns.trigger(player.guild_id, player.user_id, "work")
         await self._publish("economy", "work", guild_id, player.user_id, f"worked for +{amount:,}")
         return amount
 

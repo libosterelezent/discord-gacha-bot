@@ -6,7 +6,6 @@ background tasks.
 from __future__ import annotations
 
 import logging
-import random
 import traceback
 from typing import Any
 
@@ -59,10 +58,9 @@ class GachaBot(commands.Bot):
 
         # content + infrastructure
         self.content = ContentRegistry.load(spawn_algorithm=SETTINGS.spawn.algorithm)
-        self.rng = random.Random()
         self.db = Database(CONFIG.database_url)
         self.bus = EventBus()
-        self.cooldowns = CooldownManager(SETTINGS)
+        self.cooldowns = CooldownManager(SETTINGS, self.db)
         self.sink = DiscordSink(self, self.db, self.bus, CONFIG.maintainer_guild_id)
 
         # service graph (economy first: others depend on it)
@@ -124,6 +122,7 @@ class GachaBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         await self.db.connect()
+        await self.cooldowns.load()
         for service in self._services:
             await service.on_start()
         await self.sink.start()
