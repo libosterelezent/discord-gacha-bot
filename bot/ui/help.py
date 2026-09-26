@@ -16,7 +16,7 @@ from bot.ui.theme import Theme
 
 # display order for known categories; unknown cogs are appended after
 _CATEGORY_ORDER: tuple[str, ...] = (
-    "Economy", "Gacha", "Hunts & Profile", "Huntbot", "Equipment", "Upgrades", "Admin",
+    "Economy", "Gacha", "Hunts & Profile", "Huntbot", "Equipment", "Upgrades", "Guild", "Admin",
 )
 
 

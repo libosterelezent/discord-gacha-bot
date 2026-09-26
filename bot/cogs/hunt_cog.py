@@ -34,6 +34,9 @@ class HuntCog(GameMixin):
                 self.scope_guild(ctx), "hunt_best", "Largest single hunt",
                 ctx.author.id, result.coins,
             )
+        await self.bot.guild_prog.record_hunt(
+            self.scope_guild(ctx), ctx.author.id, coins=result.coins if result.success else 0,
+        )
 
         # extra lines that don't fit the compact card
         extras: list[str] = []

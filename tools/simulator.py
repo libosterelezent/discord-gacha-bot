@@ -32,6 +32,7 @@ CHANNEL_ID = 900_000_000_000_000_002
 BOT_ID = 900_000_000_000_000_003
 OWNER_ID = 900_000_000_000_000_004  # matches the fake application owner
 PLAYER_ID = 900_000_000_000_000_005
+VICTIM_ID = 900_000_000_000_000_777
 
 _ids = itertools.count(1)
 

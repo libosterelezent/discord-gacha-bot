@@ -18,7 +18,7 @@ EventHandler: Final = Callable[["GameEvent"], Awaitable[None]]
 
 #: Well-known event categories used by the Discord logging sink.
 EVENT_CATEGORIES: Final[tuple[str, ...]] = (
-    "economy", "gacha", "hunt", "huntbot", "equipment", "upgrades", "admin", "records", "error",
+    "economy", "gacha", "hunt", "huntbot", "equipment", "upgrades", "guild", "admin", "records", "error",
 )
 
 

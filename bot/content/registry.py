@@ -123,6 +123,31 @@ class EncounterSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class RelicSpec:
+    """A guild-wide passive; one active per server, swappable weekly."""
+
+    key: str
+    name: str
+    emoji: str
+    description: str
+    bonus: dict[str, float]
+    flavor: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ExpeditionSpec:
+    """A weekly guild-wide objective fed by ordinary gameplay."""
+
+    key: str
+    name: str
+    emoji: str
+    description: str
+    metric: str            # hunts | pulls | coins
+    target: int
+    reputation: int
+
+
+@dataclass(frozen=True, slots=True)
 class SetTier:
     size: int
     bonus: dict[str, float]  # xp_pct / coin_pct / luck_pct
@@ -219,6 +244,11 @@ class ContentRegistry:
         modifiers: list[HuntModifier] | None = None,
         encounters: list[EncounterSpec] | None = None,
         encounter_chance: float = 0.0,
+        relics: dict[str, RelicSpec] | None = None,
+        expeditions: list[ExpeditionSpec] | None = None,
+        expedition_milestones: tuple[float, ...] = (),
+        expedition_completion_coins: int = 500,
+        expedition_milestone_reputation: int = 150,
     ) -> None:
         self._rarities = rarities
         self._tier_order = sorted(rarities.values(), key=lambda r: r.tier)
@@ -232,6 +262,11 @@ class ContentRegistry:
         self._modifiers = tuple(modifiers or ())
         self._encounters = tuple(encounters or ())
         self._encounter_chance = encounter_chance
+        self._relics = relics or {}
+        self._expeditions = tuple(expeditions or ())
+        self._expedition_milestones = expedition_milestones
+        self._expedition_completion_coins = expedition_completion_coins
+        self._expedition_milestone_reputation = expedition_milestone_reputation
         self._build_indexes()
 
     def _build_indexes(self) -> None:
@@ -409,7 +444,37 @@ class ContentRegistry:
         if isinstance(raw, dict):
             chance = float(raw.get("encounter_chance", 0.0))
 
-        return cls(rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm, sets, modifiers, encounters, chance)
+        relics: dict[str, RelicSpec] = {}
+        for entry in _read_json(directory / "relics.json"):
+            relics[entry["key"]] = RelicSpec(
+                key=entry["key"], name=entry["name"], emoji=entry["emoji"],
+                description=entry.get("description", ""),
+                bonus=dict(entry.get("bonus", {})), flavor=entry.get("flavor", ""),
+            )
+
+        exp_raw = _read_json(directory / "expeditions.json")
+        exp_entries = exp_raw if isinstance(exp_raw, list) else exp_raw.get("expeditions", [])
+        expeditions: list[ExpeditionSpec] = []
+        for entry in exp_entries:
+            expeditions.append(
+                ExpeditionSpec(
+                    key=entry["key"], name=entry["name"], emoji=entry["emoji"],
+                    description=entry.get("description", ""),
+                    metric=entry["metric"], target=int(entry["target"]),
+                    reputation=int(entry.get("reputation", 0)),
+                )
+            )
+        milestones = tuple(
+            float(m) for m in (exp_raw.get("milestones", []) if isinstance(exp_raw, dict) else [])
+        )
+        completion_coins = int(exp_raw.get("completion_coins", 500)) if isinstance(exp_raw, dict) else 500
+        milestone_rep = int(exp_raw.get("milestone_reputation", 150)) if isinstance(exp_raw, dict) else 150
+
+        return cls(
+            rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm,
+            sets, modifiers, encounters, chance, relics, expeditions, milestones,
+            completion_coins, milestone_rep,
+        )
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -431,6 +496,11 @@ class ContentRegistry:
         self._modifiers = other._modifiers
         self._encounters = other._encounters
         self._encounter_chance = other._encounter_chance
+        self._relics = other._relics
+        self._expeditions = other._expeditions
+        self._expedition_milestones = other._expedition_milestones
+        self._expedition_completion_coins = other._expedition_completion_coins
+        self._expedition_milestone_reputation = other._expedition_milestone_reputation
         self._spawn_algorithm = other._spawn_algorithm
         self._build_indexes()
 
@@ -607,6 +677,40 @@ class ContentRegistry:
 
     def all_encounters(self) -> list[EncounterSpec]:
         return list(self._encounters)
+
+    # -- relics / expeditions ------------------------------------------------------
+
+    @property
+    def relics(self) -> "Mapping[str, RelicSpec]":
+        return MappingProxyType(self._relics)
+
+    def relic(self, key: str) -> RelicSpec | None:
+        return self._relics.get(key)
+
+    def all_relics(self) -> list[RelicSpec]:
+        return list(self._relics.values())
+
+    def all_expeditions(self) -> list[ExpeditionSpec]:
+        return list(self._expeditions)
+
+    def expedition_for_week(self, week: str) -> ExpeditionSpec | None:
+        """Deterministic weekly expedition (same for every guild)."""
+        if not self._expeditions:
+            return None
+        rng = random.Random(f"expedition:{week}")
+        return rng.choice(self._expeditions)
+
+    @property
+    def expedition_milestones(self) -> tuple[float, ...]:
+        return self._expedition_milestones
+
+    @property
+    def expedition_completion_coins(self) -> int:
+        return self._expedition_completion_coins
+
+    @property
+    def expedition_milestone_reputation(self) -> int:
+        return self._expedition_milestone_reputation
 
     def pick_encounter(self, rng) -> "EncounterSpec | None":
         """Weighted pick from the encounter pool, or None if empty."""

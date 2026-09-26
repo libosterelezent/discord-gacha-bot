@@ -24,6 +24,7 @@ from bot.services.badges import BadgeService
 from bot.services.economy import EconomyService
 from bot.services.equipment import EquipmentService
 from bot.services.gacha import GachaService
+from bot.services.guild import GuildProgressService
 from bot.services.hunt import HuntService
 from bot.services.huntbot import HuntBotService
 from bot.services.records import RecordService
@@ -39,6 +40,7 @@ EXTENSIONS: tuple[str, ...] = (
     "bot.cogs.huntbot_cog",
     "bot.cogs.equipment_cog",
     "bot.cogs.upgrade_cog",
+    "bot.cogs.guild_cog",
     "bot.cogs.admin_cog",
     "bot.cogs.help_cog",
 )
@@ -79,9 +81,12 @@ class GachaBot(commands.Bot):
         )
         self.huntbot = HuntBotService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
         self.badges = BadgeService(self.db, self.content, SETTINGS, self.bus, self.cooldowns)
+        self.guild_prog = GuildProgressService(
+            self.db, self.content, SETTINGS, self.bus, self.cooldowns, economy=self.economy
+        )
         self._services: tuple[Any, ...] = (
             self.records, self.economy, self.gacha, self.equipment, self.upgrades,
-            self.hunt, self.huntbot, self.badges,
+            self.hunt, self.huntbot, self.badges, self.guild_prog,
         )
 
     # -- settings ------------------------------------------------------------------
@@ -137,6 +142,11 @@ class GachaBot(commands.Bot):
         )
         owned_keys = frozenset(r["item_key"] for r in owned_rows)
         bonuses, titles = self.content.set_bonuses(owned_keys)
+        # server relic: a second, guild-wide bonus layer (same stat keys)
+        relic = await self.guild_prog.get_relic(player.guild_id) if player.guild_id else None
+        if relic is not None:
+            for stat, value in relic.bonus.items():
+                bonuses[stat] = bonuses.get(stat, 0.0) + value
         profile = StatProfile.compose(
             player, self.content.upgrade_effects(), set_bonuses=bonuses, set_titles=titles
         )
