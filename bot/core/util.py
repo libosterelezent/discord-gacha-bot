@@ -16,6 +16,18 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def clip(text: str, limit: int = 50) -> str:
+    """Bound user-supplied text before echoing it in error messages.
+
+    Discord caps embed descriptions at 4096 chars; echoing an unbounded
+    argument would make the error reply itself fail to send.
+    """
+    text = text.strip()
+    if len(text) > limit:
+        return text[: limit - 1] + "\u2026"
+    return text
+
+
 SQL_ADD_BALANCE = text(
     """
     UPDATE players SET balance = balance + :d, updated_at = :t

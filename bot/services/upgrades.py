@@ -11,7 +11,7 @@ from sqlalchemy import text
 
 from bot.core.events import GameEvent
 from bot.core.exceptions import InsufficientFundsError, UpgradeError
-from bot.core.util import SQL_INSERT_ECO_LOG, SQL_SUBTRACT_BALANCE_GUARDED, now_iso
+from bot.core.util import SQL_INSERT_ECO_LOG, SQL_SUBTRACT_BALANCE_GUARDED, clip, now_iso
 from bot.models.player import Player
 from bot.services.base import BaseService
 
@@ -53,7 +53,7 @@ class UpgradeService(BaseService):
         """Purchase one level; returns (spec, new_level)."""
         spec = self.content.upgrade(key)
         if spec is None:
-            raise UpgradeError(f"Unknown upgrade `{key}`.", upgrade_key=key)
+            raise UpgradeError(f"Unknown upgrade `{clip(key)}`.", upgrade_key=key)
         current = (await self.levels_for(player.guild_id, player.user_id)).get(key, 0)
         if current >= spec.max_level:
             raise UpgradeError(

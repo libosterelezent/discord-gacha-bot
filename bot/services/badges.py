@@ -18,7 +18,7 @@ from sqlalchemy import text
 
 from bot.core.events import GameEvent
 from bot.core.exceptions import GachaBotError
-from bot.core.util import now_iso
+from bot.core.util import clip, now_iso
 from bot.services.base import BaseService
 from bot.services.economy import GLOBAL_GUILD_ID
 
@@ -51,7 +51,7 @@ class BadgeService(BaseService):
         """Award a badge. Guild badges bind to `guild_id`; global ones to NULL."""
         spec = self.content.badge(badge_key)
         if spec is None:
-            raise GachaBotError(f"Unknown badge `{badge_key}`.")
+            raise GachaBotError(f"Unknown badge `{clip(badge_key)}`.")
         storage_guild = guild_id if spec.scope == "guild" else GLOBAL_GUILD_ID
         await self.db.execute(
             _SQL_GRANT,
@@ -68,7 +68,7 @@ class BadgeService(BaseService):
     async def revoke(self, guild_id: int | None, user_id: int, badge_key: str) -> "BadgeSpec":
         spec = self.content.badge(badge_key)
         if spec is None:
-            raise GachaBotError(f"Unknown badge `{badge_key}`.")
+            raise GachaBotError(f"Unknown badge `{clip(badge_key)}`.")
         storage_guild = guild_id if spec.scope == "guild" else GLOBAL_GUILD_ID
         await self.db.execute(
             """

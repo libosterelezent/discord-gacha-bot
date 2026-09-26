@@ -39,9 +39,11 @@ class UpgradeCog(GameMixin):
             (s for s in self.bot.content.all_upgrades() if key in (s.key, s.name.lower())), None
         )
         if spec is None:
+            from bot.core.util import clip
+
             valid = ", ".join(f"`{s.key}`" for s in self.bot.content.all_upgrades())
             await ctx.reply(
-                embed=Theme.error_embed(f"Unknown upgrade `{name}`. Available: {valid}"),
+                embed=Theme.error_embed(f"Unknown upgrade `{clip(name)}`. Available: {valid}"),
                 mention_author=False,
             )
             return
