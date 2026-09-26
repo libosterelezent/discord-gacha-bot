@@ -16,10 +16,8 @@ from bot.ui.theme import Theme
 
 
 def is_owner() -> commands.check:
-    async def predicate(ctx: commands.Context) -> bool:
-        app = await ctx.bot.application_info()
-        return ctx.author.id == app.owner.id
-    return commands.check(predicate)
+    """Cached owner check (discord.py caches application_info after first call)."""
+    return commands.is_owner()
 
 
 _START_TIME = time.time()

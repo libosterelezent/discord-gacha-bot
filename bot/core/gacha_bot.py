@@ -6,6 +6,7 @@ background tasks.
 from __future__ import annotations
 
 import logging
+import sys
 import traceback
 from typing import Any
 
@@ -219,8 +220,8 @@ class GachaBot(commands.Bot):
 
     async def on_error(self, event_method: str, *args: object, **kwargs: object) -> None:
         # last-resort net for non-command event handlers (on_message etc.)
-        exc = args[1] if len(args) > 1 and isinstance(args[1], BaseException) else None
-        if exc is not None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, BaseException):
             await self._report_error("event", f"in `{event_method}`", exc)
         else:
-            logger.exception("Unhandled error in event %s", event_method)
+            logger.error("Unhandled error in event %s (no exception info available)", event_method)
