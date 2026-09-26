@@ -373,6 +373,7 @@ class Simulator:
                 if t is not asyncio.current_task() and not t.done()
                 and (t.get_name().startswith("discord.py:")
                      or t.get_name().startswith("CommandTree-invoker")
+                     or t.get_name().startswith("discord-ui-view-dispatch")
                      or t.get_name().startswith("python"))
             ]
             if not pending:

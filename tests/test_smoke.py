@@ -136,6 +136,7 @@ class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.db = Database(_temp_db_url())
         await self.db.connect()
         self.registry = ContentRegistry.load()
+        self.registry._encounter_chance = 0.0  # deterministic hunts in tests
         self.bus = EventBus()
         self.cooldowns = CooldownManager.__new__(CooldownManager)  # replaced below
         from bot.config import SETTINGS
@@ -222,6 +223,31 @@ class ServiceSmokeTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await records.claim_first(1, "first_mythic", "First Mythic", 99))
         first = next(r for r in await records.all_records(1) if r["key"] == "first_mythic")
         self.assertEqual(first["user_id"], 10)
+
+    async def test_encounter_resolution_grants_rewards(self) -> None:
+        from bot.models.player import StatProfile
+
+        player = await self.economy.ensure_player(self.GUILD, self.USER)
+        profile = StatProfile.compose(player, self.registry.upgrade_effects())
+        encounter = next(
+            e for e in self.registry.all_encounters()
+            if e.key == "wandering_merchant"
+        )
+        haggle = encounter.choice("haggle")
+        assert haggle is not None
+        self.assertGreater(haggle.coins[0], 0)
+        balance_before = await self.economy.balance(self.GUILD, self.USER)
+        resolution = await self.hunt.resolve_encounter(
+            self.GUILD, player, profile, encounter, "haggle"
+        )
+        self.assertEqual(resolution.choice.key, "haggle")
+        self.assertGreaterEqual(resolution.coins, haggle.coins[0])
+        balance_after = await self.economy.balance(self.GUILD, self.USER)
+        self.assertEqual(balance_after, balance_before + resolution.coins)
+        audited = await self.db.fetch_val(
+            "SELECT COUNT(*) FROM economy_log WHERE reason = 'encounter:wandering_merchant'"
+        )
+        self.assertEqual(int(audited or 0), 1)
 
     async def test_hunt_roundtrip(self) -> None:
         from bot.models.player import StatProfile

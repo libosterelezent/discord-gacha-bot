@@ -8,6 +8,7 @@ from bot.cogs.common import GameMixin
 from bot.config import SETTINGS
 from bot.services.hunt import HuntResult
 from bot.ui import components as ui
+from bot.ui.encounters import EncounterView
 from bot.ui.theme import Theme
 
 
@@ -21,6 +22,12 @@ class HuntCog(GameMixin):
     async def hunt(self, ctx: commands.Context) -> None:
         player, profile = await self.player_profile(ctx)
         result: HuntResult = await self.bot.hunt.hunt(self.scope_guild(ctx), player, profile)
+        if result.encounter is not None:
+            await ctx.reply(
+                view=EncounterView(self.bot, player.guild_id, ctx.author.id, result.encounter),
+                mention_author=False,
+            )
+            return
         view = ui.hunt_view(result, SETTINGS.currency.emoji)
         if result.success:
             await self.bot.records.submit_max(

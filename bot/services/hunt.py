@@ -18,16 +18,25 @@ import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from sqlalchemy import text
+
 from bot.core.decorators import timed
 from bot.core.events import GameEvent
-from bot.core.util import SQL_INSERT_EQUIPMENT, SQL_UPSERT_INVENTORY, now_iso
+from bot.core.exceptions import GachaBotError
+from bot.core.util import (
+    SQL_ADD_BALANCE,
+    SQL_INSERT_ECO_LOG,
+    SQL_INSERT_EQUIPMENT,
+    SQL_UPSERT_INVENTORY,
+    now_iso,
+)
 from bot.models.items import Equipment
 from bot.models.player import Player, StatProfile
 from bot.services.base import BaseService
 
 if TYPE_CHECKING:
     from bot.config import GameSettings
-    from bot.content.registry import ContentRegistry, HuntModifier
+    from bot.content.registry import ContentRegistry, EncounterChoice, EncounterSpec, HuntModifier
     from bot.core.cooldowns import CooldownManager
     from bot.core.database import Database
     from bot.core.events import EventBus
@@ -36,7 +45,7 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class HuntResult:
-    enemy: "HuntEnemy"
+    enemy: "HuntEnemy | None"
     success: bool
     coins: int
     xp: int
@@ -46,12 +55,30 @@ class HuntResult:
     card_key: str | None = None
     level_up: int | None = None
     modifier: "HuntModifier | None" = None
+    encounter: "EncounterSpec | None" = None
 
     @property
     def headline(self) -> str:
-        if self.success:
+        if self.encounter is not None:
+            return f"{self.encounter.emoji} Something unusual happened..."
+        if self.success and self.enemy is not None:
             return f"\u2694\ufe0f You defeated **{self.enemy.name}** {self.enemy.rarity.emoji}"
-        return f"\U0001f480 **{self.enemy.name}** {self.enemy.rarity.emoji} fought back and you fled..."
+        if self.enemy is not None:
+            return f"\U0001f480 **{self.enemy.name}** {self.enemy.rarity.emoji} fought back and you fled..."
+        return "\u2753 The hunt ended strangely."
+
+
+@dataclass(slots=True)
+class EncounterResolution:
+    """Outcome of a chosen encounter option."""
+
+    encounter: "EncounterSpec"
+    choice: "EncounterChoice"
+    coins: int
+    shards: int
+    xp: int
+    item: Equipment | None = None
+    level_up: int | None = None
 
 
 _SQL_INSERT_EQUIPMENT = SQL_INSERT_EQUIPMENT
@@ -136,6 +163,15 @@ class HuntService(BaseService):
             raise
 
     async def _hunt_locked(self, guild_id: int | None, player: Player, profile: StatProfile) -> HuntResult:
+        # rare encounter? it replaces the hunt entirely (cooldown already spent)
+        if self._rng.random() < self.content.encounter_chance:
+            encounter = self.content.pick_encounter(self._rng)
+            if encounter is not None:
+                return HuntResult(
+                    enemy=None, success=False, coins=0, xp=0,
+                    power=profile.power, enemy_power=0, encounter=encounter,
+                )
+
         modifier = self.todays_modifier()
         if modifier is not None:
             # apply the daily luck scaling to a copy of the profile
@@ -219,3 +255,68 @@ class HuntService(BaseService):
             )
         )
         return result
+
+    # -- rare encounters ---------------------------------------------------------
+
+    async def resolve_encounter(
+        self, guild_id: int | None, player: Player, profile: StatProfile,
+        encounter: "EncounterSpec", choice_key: str,
+    ) -> EncounterResolution:
+        """Apply a chosen encounter outcome (coins/shards/XP/item)."""
+        choice = encounter.choice(choice_key)
+        if choice is None:
+            raise GachaBotError("That choice is no longer available.")
+
+        coins = int(self._rng.randint(*choice.coins) * (profile.coin_multiplier if choice.coins[1] > 0 else 1.0))
+        shards = self._rng.randint(*choice.shards)
+        xp = self._rng.randint(*choice.xp)
+        item: Equipment | None = None
+        if choice.item_chance > 0 and self._rng.random() < choice.item_chance:
+            rarity = self.content.roll_rarity(self._rng, luck=profile.luck)
+            templates = self.content.equipment_by_rarity(rarity)
+            if templates:
+                item = self._rng.choice(templates).roll(self._rng, rarity)
+
+        now = now_iso()
+        async with self.db.transaction() as conn:
+            if coins:
+                await conn.execute(
+                    SQL_ADD_BALANCE,
+                    {"d": coins, "t": now, "g": player.guild_id, "u": player.user_id},
+                )
+                await conn.execute(
+                    SQL_INSERT_ECO_LOG,
+                    {"g": player.guild_id, "u": player.user_id, "d": coins,
+                     "r": f"encounter:{encounter.key}", "b": player.balance + coins, "t": now},
+                )
+            if shards:
+                await conn.execute(
+                    text("UPDATE players SET shards = shards + :s, updated_at = :t WHERE guild_id = :g AND user_id = :u"),
+                    {"s": shards, "t": now, "g": player.guild_id, "u": player.user_id},
+                )
+            if item is not None:
+                await conn.execute(
+                    SQL_INSERT_EQUIPMENT,
+                    {"g": player.guild_id, "u": player.user_id, "k": item.key,
+                     "s": item.etype.key, "r": item.rarity.key,
+                     "a": item.attack, "d": item.defense, "l": item.luck, "t": now},
+                )
+        player.balance += max(coins, 0)
+        player.shards += shards
+        level_up = await self.economy.add_xp_and_level(player, xp) if xp else None
+
+        self.log.info(
+            "user=%s encounter %s choice=%s coins=%+d shards=%+d xp=%+d item=%s",
+            player.user_id, encounter.key, choice_key, coins, shards, xp, item is not None,
+        )
+        await self.bus.publish(
+            GameEvent(
+                category="hunt", action="encounter", guild_id=guild_id, user_id=player.user_id,
+                message=f"encounter: {encounter.name} — chose {choice.label} "
+                        f"({coins:+,} coins, +{shards} shards, +{xp} XP)",
+            )
+        )
+        return EncounterResolution(
+            encounter=encounter, choice=choice, coins=coins, shards=shards, xp=xp,
+            item=item, level_up=level_up,
+        )

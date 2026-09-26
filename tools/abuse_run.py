@@ -51,6 +51,7 @@ async def main() -> int:
     await sim.boot()
     bot = sim.bot
     assert bot is not None
+    bot.content._encounter_chance = 0.0  # deterministic; encounter tested separately
     print(f"  booted: {len(bot.cogs)} cogs\n")
 
     VICTIM = 900_000_000_000_000_777  # second player: fresh, broke

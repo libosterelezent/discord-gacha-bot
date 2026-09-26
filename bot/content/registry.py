@@ -93,6 +93,36 @@ class HuntModifier:
 
 
 @dataclass(frozen=True, slots=True)
+class EncounterChoice:
+    key: str
+    label: str
+    emoji: str
+    coins: tuple[int, int]
+    shards: tuple[int, int]
+    xp: tuple[int, int]
+    item_chance: float
+    flavor: str
+
+
+@dataclass(frozen=True, slots=True)
+class EncounterSpec:
+    """A rare hunt encounter with player-driven choices."""
+
+    key: str
+    name: str
+    emoji: str
+    description: str
+    weight: float
+    choices: tuple[EncounterChoice, ...]
+
+    def choice(self, key: str) -> EncounterChoice | None:
+        for choice in self.choices:
+            if choice.key == key:
+                return choice
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class SetTier:
     size: int
     bonus: dict[str, float]  # xp_pct / coin_pct / luck_pct
@@ -187,6 +217,8 @@ class ContentRegistry:
         spawn_algorithm: str = "weighted_luck",
         sets: dict[str, CardSet] | None = None,
         modifiers: list[HuntModifier] | None = None,
+        encounters: list[EncounterSpec] | None = None,
+        encounter_chance: float = 0.0,
     ) -> None:
         self._rarities = rarities
         self._tier_order = sorted(rarities.values(), key=lambda r: r.tier)
@@ -198,6 +230,8 @@ class ContentRegistry:
         self._spawn_algorithm = spawn_algorithm
         self._sets = sets or {}
         self._modifiers = tuple(modifiers or ())
+        self._encounters = tuple(encounters or ())
+        self._encounter_chance = encounter_chance
         self._build_indexes()
 
     def _build_indexes(self) -> None:
@@ -344,7 +378,38 @@ class ContentRegistry:
                 )
             )
 
-        return cls(rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm, sets, modifiers)
+        encounters_payload = _read_json(directory / "encounters.json")
+        if not isinstance(encounters_payload, list):
+            encounters_payload = encounters_payload.get("encounters", [])
+        encounters: list[EncounterSpec] = []
+        for entry in encounters_payload:
+            choices = tuple(
+                EncounterChoice(
+                    key=c["key"], label=c["label"], emoji=c.get("emoji", ""),
+                    coins=(int(c["outcome"].get("coins", [0, 0])[0]), int(c["outcome"].get("coins", [0, 0])[1])),
+                    shards=(int(c["outcome"].get("shards", [0, 0])[0]), int(c["outcome"].get("shards", [0, 0])[1])),
+                    xp=(int(c["outcome"].get("xp", [0, 0])[0]), int(c["outcome"].get("xp", [0, 0])[1])),
+                    item_chance=float(c["outcome"].get("item_chance", 0.0)),
+                    flavor=c["outcome"].get("flavor", ""),
+                )
+                for c in entry.get("choices", [])
+            )
+            if not choices:
+                raise ValueError(f"encounter '{entry['key']}' has no choices")
+            encounters.append(
+                EncounterSpec(
+                    key=entry["key"], name=entry["name"], emoji=entry.get("emoji", "❓"),
+                    description=entry.get("description", ""),
+                    weight=float(entry.get("weight", 1.0)), choices=choices,
+                )
+            )
+
+        chance = 0.0
+        raw = _read_json(directory / "encounters.json")
+        if isinstance(raw, dict):
+            chance = float(raw.get("encounter_chance", 0.0))
+
+        return cls(rarities, cards, equipment, enemies, upgrades, badges, spawn_algorithm, sets, modifiers, encounters, chance)
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -364,6 +429,8 @@ class ContentRegistry:
         self._badges = other._badges
         self._sets = other._sets
         self._modifiers = other._modifiers
+        self._encounters = other._encounters
+        self._encounter_chance = other._encounter_chance
         self._spawn_algorithm = other._spawn_algorithm
         self._build_indexes()
 
@@ -531,6 +598,22 @@ class ContentRegistry:
 
     def all_modifiers(self) -> list[HuntModifier]:
         return list(self._modifiers)
+
+    # -- rare encounters --------------------------------------------------------
+
+    @property
+    def encounter_chance(self) -> float:
+        return self._encounter_chance
+
+    def all_encounters(self) -> list[EncounterSpec]:
+        return list(self._encounters)
+
+    def pick_encounter(self, rng) -> "EncounterSpec | None":
+        """Weighted pick from the encounter pool, or None if empty."""
+        if not self._encounters:
+            return None
+        weights = [e.weight for e in self._encounters]
+        return rng.choices(self._encounters, weights=weights, k=1)[0]
 
     def modifier_for_date(self, day) -> HuntModifier | None:
         """Deterministic pick from the pool for a given date (rotation)."""
