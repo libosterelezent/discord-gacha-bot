@@ -179,10 +179,27 @@ class GachaBot(commands.Bot):
 
     # -- global error handling ------------------------------------------------------
 
+    @staticmethod
+    def _unwrap(error: BaseException) -> BaseException:
+        """Peel wrapper exceptions (CommandInvokeError, HybridAppCommandError …).
+
+        Hybrid commands wrap one level deeper than prefix commands, so a
+        single ``getattr(error, 'original')`` misses domain errors on the
+        slash path.
+        """
+        for _ in range(5):
+            inner = getattr(error, "original", None)
+            if inner is None:
+                inner = error.__cause__
+            if inner is None or inner is error:
+                break
+            error = inner
+        return error
+
     async def on_command_error(self, ctx: commands.Context, error: Exception) -> None:
         if hasattr(ctx.command, "on_error"):
             return
-        error = getattr(error, "original", error)
+        error = self._unwrap(error)
 
         if isinstance(error, commands.CommandNotFound):
             return
@@ -212,7 +229,7 @@ class GachaBot(commands.Bot):
         )
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: Exception) -> None:
-        error = getattr(error, "original", error)
+        error = self._unwrap(error)
         if isinstance(error, GachaBotError):
             message = Theme.error_embed(str(error))
         elif isinstance(error, discord.app_commands.CommandOnCooldown):
