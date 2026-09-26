@@ -33,6 +33,23 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         print(f"  FAIL  {name} {detail}")
 
 
+def bot_settings_gacha_pity() -> int:
+    from bot.config import SETTINGS
+
+    return SETTINGS.gacha.pity_limit
+
+
+def _find_custom_id(node, component_type: int):
+    if isinstance(node, dict):
+        if node.get("type") == component_type and "custom_id" in node:
+            yield node["custom_id"]
+        for child in node.get("components", []):
+            yield from _find_custom_id(child, component_type)
+    elif isinstance(node, list):
+        for child in node:
+            yield from _find_custom_id(child, component_type)
+
+
 def has(sim, needle: str) -> bool:
     return needle.lower() in sim.http.last_text().lower()
 
@@ -298,6 +315,53 @@ async def main() -> int:
     check("pay blocked in DM (guild-only)", has(sim, "server") or has(sim, "error"))
     await sim.send_dm(OWNER_ID, "owner", f"!grant <@{PLAYER_ID}> 10")
     check("grant blocked in DM (guild-only)", has(sim, "server") or has(sim, "error"))
+
+    # ------------------------------------------------------------------ content features
+    print("[content abuse]")
+    # deterministic epic+: park pity one below the limit so the floor (legendary) fires
+    await sim.send(OWNER_ID, "owner", f"!grant <@{PLAYER_ID}> 1000")
+    await sim.db.execute(
+        "UPDATE players SET pity_counter = :p WHERE guild_id = :g AND user_id = :u",
+        {"p": bot_settings_gacha_pity() - 1, "g": GUILD_ID, "u": PLAYER_ID},
+    )
+    await sim.send(PLAYER_ID, "player", "!pull")
+    pull_created = sim.http.last.created
+    share_id = next(_find_custom_id(pull_created, 2), None)
+    check("epic+ pull carries share button", bool(share_id))
+    if share_id:
+        await sim.component(PLAYER_ID, pull_created, 2, share_id)
+        first = sim.last_interaction_payload()
+        check("share posts publicly", first.get("type") == 4 and not (first.get("data", {}).get("flags", 0) & 64),
+              str(first)[:80])
+        await sim.component(PLAYER_ID, pull_created, 2, share_id)
+        second = sim.last_interaction_payload()
+        check("share is one-shot", (second.get("data", {}).get("flags", 0) & 64)
+              or "already" in str(second).lower(), str(second)[:80])
+
+    await sim.send(VICTIM, "victim", "!hunt_info")
+    check("hunt_info shows today's modifier", "today's modifier" in sim.http.last_text().lower())
+    fresh_col = 900_000_000_000_002_100
+    await sim.send(fresh_col, "freshcol", "!balance")
+    await sim.send(fresh_col, "freshcol", "!collection")
+    check("collection of a cardless player renders with sets",
+          "collection" in sim.http.last_text().lower()
+          and any(s in sim.http.last_text() for s in ("Beast Court", "Prime Pantheon", "Streets")))
+    await sim.send(fresh_col, "freshcol", "!profile")
+    check("cardless profile renders (no set titles)",
+          "level" in sim.http.last_text().lower()
+          and "card sets" not in sim.http.last_text().lower())
+    await sim.send(fresh_col, "freshcol", "!records")
+    check("records command renders hall", "hall of records" in sim.http.last_text().lower())
+
+    # encounter abuse: cooldown is spent even when the encounter is never answered
+    enc_ab = 900_000_000_000_002_200
+    await sim.send(enc_ab, "encab", "!balance")
+    bot.content._encounter_chance = 1.0
+    await sim.send(enc_ab, "encab", "!hunt")
+    check("encounter card replaces hunt", "choose within 5 minutes" in sim.http.last_text().lower())
+    await sim.send(enc_ab, "encab", "!hunt")
+    check("unanswered encounter still spends the cooldown", has(sim, "slow down"))
+    bot.content._encounter_chance = 0.0
 
     # ------------------------------------------------------------------ misc
     print("[misc]")
