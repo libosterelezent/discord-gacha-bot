@@ -20,11 +20,26 @@ os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{Path(_TMP) / 'sim.db'}"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from simulator import (  # noqa: E402
-    GUILD_ID, OWNER_ID, PLAYER_ID, Simulator,
+    CHANNEL_ID, GUILD_ID, OWNER_ID, PLAYER_ID, Simulator,
 )
 
 PASSED: list[str] = []
 FAILED: list[str] = []
+
+
+def _find_custom_id(message_payload: dict, component_type: int) -> str | None:
+    """Locate a custom_id of the given component type in a CV2 payload."""
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == component_type and "custom_id" in node:
+                yield node["custom_id"]
+            for child in node.get("components", []):
+                yield from walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                yield from walk(child)
+
+    return next(walk(message_payload.get("components", [])), None)
 
 
 def check(name: str, condition: bool, detail: str = "") -> None:
@@ -38,6 +53,9 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 def expect_reply_text(sim: "Simulator", needle: str) -> bool:
     return needle.lower() in sim.http.last_text().lower()
+
+
+import discord as _discord  # noqa: E402
 
 
 async def main() -> int:
@@ -195,8 +213,117 @@ async def main() -> int:
     await sim.send(PLAYER_ID, "player", "!leaderboard")
     check("leaderboard renders", expect_reply_text(sim, "wealthiest"))
 
+    # -- slash commands (interaction dispatch) --------------------------------------
+    print("[slash]")
+    n_sent = len(sim.http.sent)
+    await sim.slash(PLAYER_ID, "balance")
+    check("slash /balance responds", len(sim.http.sent) > n_sent
+          and "player" in sim.http.last_text().lower())
+
+    await sim.slash(PLAYER_ID, "gamble", amount=10)
+    text = sim.http.last_text().lower()
+    check("slash /gamble resolves", "won" in text or "lost" in text, text[:80])
+
+    await sim.slash(PLAYER_ID, "gamble", amount=999_999_999)
+    check("slash error path replies",
+          "need" in sim.http.last_text().lower(), sim.http.last_text()[:80])
+
+    try:
+        synced = await bot.tree.sync()
+        check("tree.sync completes against REST", isinstance(synced, list))
+    except Exception as exc:  # pragma: no cover
+        check("tree.sync completes against REST", False, repr(exc))
+
+    # -- component interactions (help menu navigation) -------------------------------
+    print("[components]")
+    await sim.send(PLAYER_ID, "player", "!help")
+    help_raw = sim.http.last.created  # message payload incl. id + components
+    select_id = _find_custom_id(help_raw, 3)   # wire type 3 = string select
+    button_id = _find_custom_id(help_raw, 2)   # wire type 2 = button
+    check("help menu has select + buttons", bool(select_id and button_id))
+    if select_id:
+        await sim.component(PLAYER_ID, help_raw, 3, select_id, values=["Gacha"])
+        payload = sim.last_interaction_payload()
+        edited = payload.get("type") == 7 and payload.get("data", {}).get("components")
+        check("select navigates (UPDATE_MESSAGE with new view)", bool(edited), str(payload)[:100])
+    if button_id:
+        await sim.component(PLAYER_ID, help_raw, 2, button_id)
+        payload = sim.last_interaction_payload()
+        edited = payload.get("type") == 7 and payload.get("data", {}).get("components")
+        check("button navigates (UPDATE_MESSAGE with new view)", bool(edited), str(payload)[:100])
+
+    # -- gateway lifecycle -------------------------------------------------------------
+    print("[ready/presence]")
+    await sim.ready()
+    check("on_ready sets presence", bool(sim.presence.get("activity")), str(sim.presence))
+
+    # -- huntbot loop iteration ----------------------------------------------------------
+    print("[huntbot loop]")
+    battery_before = await sim.fetch_val(
+        "SELECT battery FROM huntbots WHERE guild_id = :g AND user_id = :u",
+        {"g": GUILD_ID, "u": PLAYER_ID},
+    )
+    await sim.bot.huntbot._loop_iteration()
+    battery_after = await sim.fetch_val(
+        "SELECT battery FROM huntbots WHERE guild_id = :g AND user_id = :u",
+        {"g": GUILD_ID, "u": PLAYER_ID},
+    )
+    check("huntbot loop ticks batteries", battery_after == (battery_before or 0) + 1,
+          f"{battery_before} -> {battery_after}")
+
+    # -- observability sink ----------------------------------------------------------
+    print("[sink]")
+    await sim.bot.sink.set_channel(GUILD_ID, "gacha", CHANNEL_ID)
+    n_sent = len(sim.http.sent)
+    sim.bot.bus and await sim.bot.bus.publish(
+        __import__("bot.core.events", fromlist=["GameEvent"]).GameEvent(
+            category="gacha", action="pull", guild_id=GUILD_ID, user_id=PLAYER_ID,
+            message="sim event",
+        )
+    )
+    for _ in range(50):
+        if len(sim.http.sent) > n_sent:
+            break
+        await asyncio.sleep(0.05)
+    check("sink delivers event to routed channel", len(sim.http.sent) > n_sent)
+
+    # -- rate-limit fault injection ------------------------------------------------------
+    print("[ratelimit]")
+
+    class _FakeResponse:
+        status = 429
+        reason = "Too Many Requests"
+        text = "429"
+        code = 0
+        headers = {"X-RateLimit-Reset-After": "0.05"}
+
+    sim.http.inject_failures(
+        "/channels/",
+        _discord.HTTPException(_FakeResponse(), "rate limited"),
+        _discord.HTTPException(_FakeResponse(), "rate limited"),
+    )
+    attempts_before = len(sim.http.attempts)
+    await sim.bot.bus.publish(
+        __import__("bot.core.events", fromlist=["GameEvent"]).GameEvent(
+            category="gacha", action="pull", guild_id=GUILD_ID, user_id=PLAYER_ID,
+            message="sim event 2",
+        )
+    )
+    for _ in range(100):
+        if len(sim.http.attempts) >= attempts_before + 3:
+            break
+        await asyncio.sleep(0.05)
+    check("429s retried then delivered",
+          len(sim.http.attempts) >= attempts_before + 3
+          and len(sim.http.sent) > n_sent + 1,
+          f"attempts={len(sim.http.attempts) - attempts_before}")
+
     # -- restart persistence ---------------------------------------------------------
     print("[restart]")
+    balance_before = await sim.fetch_val(
+        "SELECT balance FROM players WHERE guild_id = :g AND user_id = :u",
+        {"g": GUILD_ID, "u": PLAYER_ID},
+    )
     daily_left = await sim.fetch_val(
         "SELECT COUNT(*) FROM cooldowns WHERE action = 'daily' AND user_id = :u",
         {"u": PLAYER_ID},
@@ -214,7 +341,7 @@ async def main() -> int:
         "SELECT balance FROM players WHERE guild_id = :g AND user_id = :u",
         {"g": GUILD_ID, "u": PLAYER_ID},
     )
-    check("balance survived restart", bal2 == 11_845, f"bal={bal2}")
+    check("balance survived restart", bal2 == balance_before, f"{balance_before} -> {bal2}")
 
     players = await sim2.fetch_val("SELECT COUNT(*) FROM players")
     check("player rows sane", int(players or 0) == 2, f"players={players}")

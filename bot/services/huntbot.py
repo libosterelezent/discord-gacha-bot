@@ -382,26 +382,30 @@ class HuntBotService(BaseService):
         try:
             while True:
                 await asyncio.sleep(self.settings.huntbot.loop_interval)
-                try:
-                    rows = await self.db.fetch_all(
-                        """
-                        SELECT hb.guild_id, hb.user_id,
-                               COALESCE((SELECT level FROM upgrades
-                                         WHERE guild_id = hb.guild_id AND user_id = hb.user_id
-                                           AND upgrade_key = 'harvest'), 0) AS harvest
-                        FROM huntbots hb
-                        WHERE hb.active = 1 AND hb.battery < :cap
-                        """,
-                        {"cap": self.settings.huntbot.battery_capacity},
-                    )
-                    harvest_spec = self.content.upgrade("harvest")
-                    for row in rows:
-                        await self._tick_user(
-                            int(row["guild_id"]), int(row["user_id"]),
-                            row["harvest"] * (harvest_spec.effect_per_level if harvest_spec else 0.0),
-                        )
-                except Exception:
-                    self.log.exception("huntbot loop iteration failed")
+                await self._loop_iteration()
         except asyncio.CancelledError:
             self.log.debug("huntbot loop cancelled")
             raise
+
+    async def _loop_iteration(self) -> None:
+        """One heartbeat pass (extracted for testability)."""
+        try:
+            rows = await self.db.fetch_all(
+                """
+                SELECT hb.guild_id, hb.user_id,
+                       COALESCE((SELECT level FROM upgrades
+                                 WHERE guild_id = hb.guild_id AND user_id = hb.user_id
+                                   AND upgrade_key = 'harvest'), 0) AS harvest
+                FROM huntbots hb
+                WHERE hb.active = 1 AND hb.battery < :cap
+                """,
+                {"cap": self.settings.huntbot.battery_capacity},
+            )
+            harvest_spec = self.content.upgrade("harvest")
+            for row in rows:
+                await self._tick_user(
+                    int(row["guild_id"]), int(row["user_id"]),
+                    row["harvest"] * (harvest_spec.effect_per_level if harvest_spec else 0.0),
+                )
+        except Exception:
+            self.log.exception("huntbot loop iteration failed")
