@@ -11,6 +11,7 @@ warning and never breaks gameplay.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -31,9 +32,18 @@ WILDCARD_CATEGORY: str = "all"
 
 VALID_CATEGORIES: tuple[str, ...] = EVENT_CATEGORIES + (WILDCARD_CATEGORY,)
 
+_QUEUE_MAX: int = 512          # events waiting to be delivered
+_DRAIN_TIMEOUT: float = 10.0   # seconds given to flush on shutdown
+
 
 class DiscordSink:
-    """Routes :class:`GameEvent` objects to configured Discord channels."""
+    """Routes :class:`GameEvent` objects to configured Discord channels.
+
+    Delivery is fire-and-forget: handlers enqueue events and a background
+    worker performs the (potentially slow, rate-limited) Discord sends.
+    Gameplay therefore never awaits Discord HTTP — a 429 backoff on a log
+    channel cannot stall a player's command.
+    """
 
     def __init__(self, bot: discord.Client, db: "Database", bus: EventBus, maintainer_guild_id: int | None) -> None:
         self._bot = bot
@@ -44,6 +54,8 @@ class DiscordSink:
         # guild_id -> {category: channel_id}
         self._routes: dict[int, dict[str, int]] = {}
         self._handler = None
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX)
+        self._worker: asyncio.Task | None = None
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -51,12 +63,23 @@ class DiscordSink:
         await self._load_routes()
         self._handler = self._handle
         await self._bus.subscribe(self._handler)
+        self._worker = asyncio.create_task(self._drain(), name="discord-sink")
         logger.info("Discord sink started (%d guilds routed)", len(self._routes))
 
     async def stop(self) -> None:
         if self._handler is not None:
             await self._bus.unsubscribe(self._handler)
             self._handler = None
+        if self._worker is not None:
+            try:
+                await self._queue.put(None)  # sentinel: flush then exit
+            except asyncio.QueueFull:
+                self._worker.cancel()
+            try:
+                await asyncio.wait_for(self._worker, timeout=_DRAIN_TIMEOUT)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._worker.cancel()
+            self._worker = None
 
     async def _load_routes(self) -> None:
         self._routes.clear()
@@ -90,6 +113,30 @@ class DiscordSink:
     # -- event handling ---------------------------------------------------------
 
     async def _handle(self, event: GameEvent) -> None:
+        """Bus handler: enqueue for the worker; drop (with a log) under pressure."""
+        try:
+            self._queue.put_nowait(event)
+        except asyncio.QueueFull:
+            logger.warning(
+                "Event sink queue full (%d) — dropping %s/%s",
+                _QUEUE_MAX, event.category, event.action,
+            )
+
+    async def _drain(self) -> None:
+        while True:
+            event = await self._queue.get()
+            if event is None:
+                break
+            try:
+                await self._dispatch(event)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Sink dispatch failed for %s/%s", event.category, event.action)
+            finally:
+                self._queue.task_done()
+
+    async def _dispatch(self, event: GameEvent) -> None:
         channel_ids = self._target_channels(event)
         if not channel_ids:
             return
